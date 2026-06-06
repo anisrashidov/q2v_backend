@@ -11,22 +11,39 @@ POST /api/query  {"query": "...", "time_period": [...]}
         │
         ▼
 ┌─────────────────────────────────────────────────────────┐
+│  agent/pipeline.py — plan-and-execute orchestrator      │
+│                                                         │
+│  1. plan_query() makes ONE structured-output LLM call   │
+│     (no tools) → a validated QueryPlan describing        │
+│     whether the query is answerable, the search          │
+│     strategy, and the chart(s) to produce.              │
+│  2. Clarification gate: if the plan flags a non-clinical │
+│     or under-specified query, reject with code 400       │
+│     before any ClinicalTrials.gov call. Planner failure  │
+│     degrades gracefully — the loop runs without a plan.  │
+│  3. Otherwise hand the plan to run_agent() to execute.   │
+└─────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────────────────────────┐
 │  agent/loop.py  — agentic tool-calling loop             │
 │                                                         │
-│  1. Builds a messages list with the system prompt and   │
-│     the user question.                                  │
+│  1. Seeds a messages list with the system prompt, the   │
+│     user question, and the plan as guidance.            │
 │  2. Calls the OpenAI Chat Completions API with a full   │
-│     catalogue of 24 tools.                              │
+│     catalogue of 26 tools (first turn forced to call    │
+│     a tool).                                            │
 │  3. Executes every tool call returned by the model,     │
 │     feeding results back into the conversation.         │
 │  4. Repeats until the model calls build_visualization   │
-│     and then stops (finish_reason = "stop").            │
+│     and then stops (finish_reason = "stop"). The         │
+│     iteration budget scales with the planned chart count.│
 │  5. Returns all accumulated VisualizationSpec objects.  │
 └─────────────────────────────────────────────────────────┘
         │
         ▼
 ┌─────────────────────────────────────────────────────────┐
-│  ToolRegistry — 26 tools in four categories             │
+│  ToolRegistry — 26 tools in six categories              │
 │                                                         │
 │  Data retrieval   search_trials, search_trials_by_nct,  │
 │                   get_trial_details                     │
@@ -74,8 +91,6 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
-# For development / testing
-pip install -r requirements-dev.txt
 ```
 
 ### Configure
@@ -89,7 +104,7 @@ cp .env.example .env
 | Variable         | Default                             | Description                              |
 | ---------------- | ----------------------------------- | ---------------------------------------- |
 | `OPENAI_API_KEY` | —                                   | **Required.** OpenAI API key             |
-| `OPENAI_MODEL`   | `gpt-4.1`                           | Model used for all tool-calling          |
+| `OPENAI_MODEL`   | `gpt-4.1`                           | Model for all LLM calls (planner + loop) |
 | `CT_BASE_URL`    | `https://clinicaltrials.gov/api/v2` | ClinicalTrials.gov v2 base URL           |
 | `CT_MAX_PAGES`   | `5`                                 | Max pagination depth per search          |
 | `CT_TIMEOUT`     | `30.0`                              | HTTP timeout in seconds                  |
@@ -100,6 +115,12 @@ cp .env.example .env
 
 ```bash
 python -m uvicorn app.main:app --reload
+```
+
+To add debugging for more verbose logging:
+
+```bash
+python -m uvicorn app.main:app --reload --log-level debug
 ```
 
 Interactive API docs: <http://localhost:8000/docs>
@@ -164,9 +185,19 @@ HTTP `500` (no envelope) for unexpected server errors.
 			"sequence_index": 0,
 			"group": null
 		}
-	]
+	],
+	"interpreted_params": null,
+	"data_summary": null
 }
 ```
+
+| Field                | Type                  | Description                                                              |
+| -------------------- | --------------------- | ---------------------------------------------------------------------- |
+| `visualizations`     | `VisualizationSpec[]` | One spec per chart, ordered by `sequence_index` (fields detailed below) |
+| `interpreted_params` | `object \| null`      | Reserved for the derived search params; currently always `null`         |
+| `data_summary`       | `object \| null`      | Reserved for dataset totals (`total_count`/`retrieved`/`has_more`); currently always `null` |
+
+Each `VisualizationSpec` in `visualizations` has the following fields:
 
 | Field            | Type             | Description                                                                 |
 | ---------------- | ---------------- | --------------------------------------------------------------------------- |
@@ -182,17 +213,17 @@ HTTP `500` (no envelope) for unexpected server errors.
 
 #### `ChartType` values and expected encoding / data
 
-| `chart_type`     | `encoding`                                                                                                  | `data` record shape                                           |
-| ---------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `chart_type`     | `encoding`                                                                                                  | `data` record shape                                                 |
+| ---------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | `bar_chart`      | `{x: "label", y: "value"}` (add `group: "group"` for a grouped comparison)                                  | `{label, value}` — or `{label, value, group}` from `compare_groups` |
-| `time_series`    | `{x: "label", y: "value"}`                                                                                  | `{label, value}`                                              |
-| `scatter_plot`   | `{x: "label", y: "value"}`                                                                                  | `{label, value}`                                              |
-| `histogram`      | `{x: "label", y: "count"}`                                                                                  | `{label, count}`                                              |
-| `network_graph`  | `{node_id: "id", node_label: "label", edge_source: "source", edge_target: "target", edge_weight: "weight"}` | `{nodes: [...], edges: [...]}` (single element)               |
-| `choropleth_map` | `{location: "country_name", color: "count"}`                                                                | `{country_name, country_code, count}`                         |
-| `none`           | `{}`                                                                                                        | Single numeric answer — use `description` to convey the value |
-| `table`          | `{columns: ["col1", "col2"]}`                                                                               | `{col1, col2, …}` (one row per record)                        |
-| `heatmap`        | `{x: "col", y: "row", color: "value"}`                                                                      | `{row, col, value}` (one record per cell)                     |
+| `time_series`    | `{x: "label", y: "value"}`                                                                                  | `{label, value}`                                                    |
+| `scatter_plot`   | `{x: "label", y: "value"}`                                                                                  | `{label, value}`                                                    |
+| `histogram`      | `{x: "label", y: "count"}`                                                                                  | `{label, count}`                                                    |
+| `network_graph`  | `{node_id: "id", node_label: "label", edge_source: "source", edge_target: "target", edge_weight: "weight"}` | `{nodes: [...], edges: [...]}` (single element)                     |
+| `choropleth_map` | `{location: "country_name", color: "count"}`                                                                | `{country_name, country_code, count}`                               |
+| `none`           | `{}`                                                                                                        | Single numeric answer — use `description` to convey the value       |
+| `table`          | `{columns: ["col1", "col2"]}`                                                                               | `{col1, col2, …}` (one row per record)                              |
+| `heatmap`        | `{x: "col", y: "row", color: "value"}`                                                                      | `{row, col, value}` (one record per cell)                           |
 
 The `encoding` object is intentionally Vega-Lite-inspired but not tied to it. Pass it directly to Vega-Lite, Recharts, Chart.js, D3, or any other renderer.
 
@@ -210,9 +241,9 @@ The `encoding` object is intentionally Vega-Lite-inspired but not tied to it. Pa
 
 ## Design Decisions and Tradeoffs
 
-### Agentic tool-calling loop instead of a fixed pipeline
+### Plan-and-execute instead of a single agentic loop
 
-Earlier iterations used a fixed multi-stage pipeline (interpret → retrieve → aggregate → visualise). This was replaced with a single agentic loop where the model drives all decisions via tool calls. The benefit is flexibility: the model can call `search_trials` multiple times for comparisons, chain aggregation and transformation tools arbitrarily, and decide independently whether a bar chart or choropleth map best answers the question. The tradeoff is non-determinism — the same query may take different paths on different runs, making debugging harder.
+Earlier iterations used a fixed multi-stage pipeline (interpret → retrieve → aggregate → visualise), then a single open-ended agentic loop. The current design is plan-and-execute: a dedicated planning call (`plan_query`) produces a structured `QueryPlan` — answerability, search strategy, and intended chart(s) — before any tools run, and the agentic loop (`run_agent`) then executes that plan with full tool access. This buys two things over a bare loop: a deterministic clarification gate that rejects non-clinical or under-specified queries *before* spending a ClinicalTrials.gov call, and an iteration budget that scales with the planned chart count. The loop keeps the flexibility to deviate — calling `search_trials` multiple times for comparisons, chaining aggregation/transformation tools, and choosing the final chart type. The tradeoff is an extra LLM call per request and residual non-determinism in the execution phase; planning failures degrade gracefully by running the loop without a plan.
 
 ### All search parameters extracted from natural language
 
@@ -278,10 +309,10 @@ The `benchmark/` directory contains tooling for end-to-end quality evaluation ag
 
 ### Files
 
-| File | Purpose |
-|---|---|
-| `tests.txt` | 37 evaluation queries covering the full range of chart types, aggregations, comparisons, and time-range requests |
-| `run_eval.py` | POSTs each query to the running API and writes `{query, timestamp, duration_ms, response}` per line to `results.jsonl` |
+| File             | Purpose                                                                                                                 |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `tests.txt`      | 37 evaluation queries covering the full range of chart types, aggregations, comparisons, and time-range requests        |
+| `run_eval.py`    | POSTs each query to the running API and writes `{query, timestamp, duration_ms, response}` per line to `results.jsonl`  |
 | `eval_result.py` | Reads `results.jsonl`, calls an LLM to score each response 0.0–1.0 on completeness and soundness, writes `scores.jsonl` |
 
 ### Running the benchmark
@@ -352,7 +383,5 @@ q2v_agent/
 │   ├── conftest.py
 │   └── test_api.py        # TestClient smoke tests (30 tests, all passing)
 ├── .env.example
-├── requirements.txt
-└── requirements-dev.txt
+└── requirements.txt
 ```
-
