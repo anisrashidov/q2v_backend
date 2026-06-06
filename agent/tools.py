@@ -433,6 +433,7 @@ class ToolRegistry:
             "search_trials_by_nct":    self._search_trials_by_nct,
             "get_trial_details":       self._get_trial_details,
             # Aggregation
+            "list_studies":            self._list_studies,
             "aggregate_by":            self._aggregate_by,
             # "aggregate_by_multi":      self._aggregate_by_multi,
             "extract_field_values":    self._extract_field_values,
@@ -590,6 +591,43 @@ class ToolRegistry:
             result.extend(extractor(study))
         return result
 
+    def _list_studies(
+        self,
+        search_id: str,
+        fields: Optional[list[str]] = None,
+        top_n: Optional[int] = None,
+        page_size: Optional[int] = None,
+    ) -> list[dict]:
+        studies = self._require_search(search_id)
+        limit = top_n if top_n is not None else page_size
+        if limit is not None:
+            studies = studies[:limit]
+        _all_fields = ["nct_id", "brief_title", "overall_status", "phases", "sponsor", "start_date", "conditions", "countries", "enrollment"]
+        selected = fields if fields else _all_fields
+        rows = []
+        for s in studies:
+            row: dict[str, Any] = {}
+            if "nct_id" in selected:
+                row["nct_id"] = s.nct_id
+            if "brief_title" in selected:
+                row["brief_title"] = s.brief_title
+            if "overall_status" in selected:
+                row["overall_status"] = s.overall_status
+            if "phases" in selected:
+                row["phases"] = ", ".join(s.phases) if s.phases else None
+            if "sponsor" in selected:
+                row["sponsor"] = s.sponsor
+            if "start_date" in selected:
+                row["start_date"] = s.start_date
+            if "conditions" in selected:
+                row["conditions"] = ", ".join(s.conditions[:3]) if s.conditions else None
+            if "countries" in selected:
+                row["countries"] = ", ".join(sorted(s.countries)[:3]) if s.countries else None
+            if "enrollment" in selected:
+                row["enrollment"] = s.enrollment
+            rows.append(row)
+        return rows
+
     def _compute_co_occurrence(self, search_id: str, field_a: str, field_b: str) -> dict:
         studies = self._require_search(search_id)
         matrix: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -709,6 +747,35 @@ TOOL_SCHEMAS: list[dict] = [
         },
     },
     # ── Aggregation ────────────────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "list_studies",
+            "description": (
+                "Return study records as table rows. "
+                "Use before build_visualization(type='table') to surface individual trials. "
+                "Pass the result directly as data=."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "search_id": {"type": "string"},
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["nct_id", "brief_title", "overall_status", "phases", "sponsor", "start_date", "conditions", "countries", "enrollment"],
+                        },
+                        "description": "Columns to include. Defaults to all fields when omitted.",
+                    },
+                    "top_n": {"type": "integer", "description": "Limit to first N studies (default: all)"},
+                    "page_size": {"type": "integer", "description": "Alias for top_n"},
+                },
+                "required": ["search_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -1172,7 +1239,8 @@ TOOL_SCHEMAS: list[dict] = [
                             "histogram=value distribution (bin_continuous) | "
                             "network_graph=nodes+edges (build_network) | "
                             "choropleth_map=geographic fill (aggregate_by_country) | "
-                            "none=single answer"
+                            "none=single answer | "
+                            "table=multi-column rows"
                         ),
                     },
                     "title": {"type": "string"},
@@ -1183,7 +1251,8 @@ TOOL_SCHEMAS: list[dict] = [
                             "bar_chart → {x:'label',y:'value'} | "
                             "time_series → {x:'label',y:'value'} | "
                             "choropleth_map → {location:'country_name',color:'count'} | "
-                            "network_graph → {node_id:'id',node_label:'label',edge_source:'source',edge_target:'target',edge_weight:'weight'}"
+                            "network_graph → {node_id:'id',node_label:'label',edge_source:'source',edge_target:'target',edge_weight:'weight'} | "
+                            "table → {columns:['col1',…]}"
                         ),
                     },
                     "data": {
@@ -1194,7 +1263,8 @@ TOOL_SCHEMAS: list[dict] = [
                             "bar/time/scatter/histogram → [{label,value,…}] | "
                             "grouped_bar → [{label,value,<group_field>}] | "
                             "choropleth_map → [{country_name,country_code,count}] | "
-                            "network_graph → [{nodes:[…],edges:[…]}] (single element)"
+                            "network_graph → [{nodes:[…],edges:[…]}] (single element) | "
+                            "table → [{col1,col2,…}]"
                         ),
                     },
                     "description": {"type": "string", "description": "One-sentence plain-language summary"},

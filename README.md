@@ -190,6 +190,7 @@ HTTP `500` (no envelope) for unexpected server errors.
 | `network_graph`  | `{node_id: "id", node_label: "label", edge_source: "source", edge_target: "target", edge_weight: "weight"}` | `{nodes: [...], edges: [...]}` (single element)               |
 | `choropleth_map` | `{location: "country_name", color: "count"}`                                                                | `{country_name, country_code, count}`                         |
 | `none`           | `{}`                                                                                                        | Single numeric answer — use `description` to convey the value |
+| `table`          | `{columns: ["col1", "col2"]}`                                                                               | `{col1, col2, …}` (one row per record)                        |
 
 The `encoding` object is intentionally Vega-Lite-inspired but not tied to it. Pass it directly to Vega-Lite, Recharts, Chart.js, D3, or any other renderer.
 

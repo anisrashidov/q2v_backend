@@ -19,6 +19,10 @@ user's question about clinical trials, then call build_visualization.
   Example: for "trials by status", search broadly, then aggregate_by("status").
 
 ━━━ Aggregation ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• list_studies — returns raw study rows; feed into build_visualization(type="table").
+  Use whenever the user would benefit from seeing the actual trials, not just aggregate
+  counts (e.g. "show me the trials", "what studies are available", "list the options").
+  Always pair with aggregate charts when producing a dashboard — table last.
 • aggregate_by — single dimension, returns {label: count}.
 • extract_field_values — pulls raw values for a field (enrollment, year, …);
   feed into bin_continuous or compute_summary_stats.
@@ -68,6 +72,7 @@ network_graph      {node_id:"id", node_label:"label",       co-occurrence networ
                     edge_target:"target", edge_weight:"weight"}
 choropleth_map     {location:"country_name", color:"count"} aggregate_by_country
 none               {}                                        single numeric answer
+table              {columns:["col1","col2",…]}               ranked list or multi-column detail
 
 For multi-line time_series (merge_time_series output), include each series
 name as a key in encoding, e.g. {x:"label", y:["Drug A","Drug B"]}.
@@ -84,6 +89,8 @@ choropleth_map:
   data=[{"country_name": "United States", "country_code": null, "count": 500}, …]
 network_graph:
   data=[{"nodes": […], "edges": […]}]  ← single element from build_network
+table:
+  data=[{"nct_id": "…", "brief_title": "…", …}, …]  ← list_studies output; column order from encoding.columns
 
 ━━━ Multi-chart responses ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Be economical: one well-chosen chart is almost always better than several.

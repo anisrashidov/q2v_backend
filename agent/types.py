@@ -240,6 +240,7 @@ class ChartType(str, Enum):
     network_graph     = "network_graph"
     choropleth_map    = "choropleth_map"
     none              = "none"
+    table             = "table"          # table → ranked or multi-column tabular listing
 
 
 class DataPoint(BaseModel):

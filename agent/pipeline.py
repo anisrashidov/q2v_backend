@@ -28,6 +28,10 @@ async def run_pipeline(
 ) -> PipelineResult:
     logger.info("Pipeline start | question=%s", question)
 
+    if time_period is None:
+        today = date.today()
+        time_period = (date(today.year - 3, today.month, today.day), today)
+
     visualizations = await run_agent(
         question=question,
         ct_api=ct_api,
