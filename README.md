@@ -277,29 +277,17 @@ Client-visible errors (bad query, wrong API key, rate limit) return HTTP 200 wit
 
 The backend only queries ClinicalTrials.gov. Other major registries (EU Clinical Trials Register, WHO ICTRP, ISRCTN) are not integrated. A registry-agnostic adapter layer and a query fan-out strategy would significantly improve completeness.
 
-### In-memory study cache
-
-`study_cache` lives in the `ToolRegistry` object for the lifetime of one request and is then discarded. For large paginated result sets this means the data is re-fetched on every request. A short-lived per-request cache (e.g. keyed by a hash of the query parameters) backed by Redis would reduce API load and latency on repeated or similar queries.
-
-### Year-level date filtering
-
-`search_trials` accepts `start_year` and `end_year` as integers because the ClinicalTrials.gov API exposes year-level filters. Full ISO-date filtering (e.g. "trials that started after 2022-06-01") is not supported at the retrieval layer and would require post-fetch filtering in Python, which reduces result set accuracy when `max_pages` is low.
-
 ### No streaming
 
 The entire agentic loop completes before any bytes are sent to the client. For complex multi-tool queries (5–10 tool calls, large paginated result sets) this can mean 10–30 seconds of silence. Server-Sent Events or WebSocket streaming of intermediate tool results would improve perceived responsiveness.
-
-### No request authentication or per-user rate limiting
-
-The API is open. In production it would need an auth layer (API keys or JWT) and per-key rate limiting to prevent abuse and to attribute OpenAI costs to individual callers.
 
 ### Continent-only geographic grouping
 
 `aggregate_by_region` only supports `region_level="continent"`. Finer-grained groupings (sub-region, WHO region, income group) would require an enriched country-to-region mapping and additional enum values in the tool schema.
 
-### Determinism and testability
+### Agent Architecture Maturity
 
-Because the LLM path is non-deterministic, integration tests mock `run_pipeline` rather than running the real loop. A replay/record mechanism (capturing OpenAI responses and replaying them deterministically) would allow true end-to-end regression tests without live API calls.
+The current system uses a relatively simple agent architecture. Evaluating and implementing more recent state-of-the-art agentic frameworks could improve performance, reliability, and task completion rates.
 
 ---
 
