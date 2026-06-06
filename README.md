@@ -385,3 +385,19 @@ q2v_agent/
 ├── .env.example
 └── requirements.txt
 ```
+
+---
+
+## Development Approach
+
+### Tooling
+
+[Claude Code](https://claude.com/claude-code) served as the primary coding assistant throughout development, used for scaffolding modules, drafting tool implementations, and iterating on the agentic loop and prompt design.
+
+### Validation
+
+Correctness was verified on two levels. A `pytest` suite (`tests/test_api.py`, 30 tests) exercises the API surface — request validation, the `BaseResponse` envelope, and error handling. Beyond unit coverage, end-to-end quality was measured with the [benchmark harness](#benchmark): 37 representative natural-language queries are run against the live pipeline and each response is scored 0.0–1.0 by an LLM evaluator on completeness and soundness (average 0.777). See the [Benchmark](#benchmark) section for the methodology and full results.
+
+### Authorship
+
+The overall architecture and design decisions — the plan-and-execute pipeline, the library-agnostic visualization schema, the tool taxonomy, the `BaseResponse` error model, and the benchmarking methodology — were my own. Claude Code generated much of the underlying implementation against that design, which I then reviewed, corrected, and refined to ensure correctness, consistency, and alignment with the intended architecture.
