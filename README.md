@@ -127,6 +127,49 @@ Interactive API docs: <http://localhost:8000/docs>
 
 ---
 
+## Demo (Streamlit UI)
+
+A Streamlit app in `demo/` provides a visual interface over the API with two tabs:
+
+| Tab | Description |
+| --- | ----------- |
+| **Gallery** | Browse all pre-computed benchmark results from `benchmark/results.jsonl` — no backend required. Filter by chart type and inspect the rendered visualization alongside the raw JSON. |
+| **Live Query** | Submit a new natural-language query to the running backend and see the result rendered in real time. |
+
+All nine chart types are rendered natively:
+
+| Chart type | Renderer |
+| --- | --- |
+| `bar_chart` | Grouped or single bar chart (Plotly) |
+| `time_series` | Line chart; dashed segment for projected points, multiple series when the encoding lists several y-columns |
+| `scatter_plot` | Scatter with optional OLS trendline |
+| `histogram` | Bar chart styled for distributions |
+| `heatmap` | Pivoted colour matrix (`px.imshow`) |
+| `choropleth_map` | Geographic fill map (`px.choropleth`) |
+| `network_graph` | Spring-layout node–edge graph; edge widths scaled by co-occurrence weight |
+| `table` | Interactive dataframe (`st.dataframe`) |
+| `none` | `st.metric` — scalar answer extracted from the description |
+
+### Install demo dependencies
+
+```bash
+pip install -r demo/requirements.txt
+```
+
+### Run the demo
+
+```bash
+# Gallery tab works without a running backend
+streamlit run demo/app.py
+
+# For the Live Query tab, start the backend first
+python -m uvicorn app.main:app --reload
+```
+
+The app opens at <http://localhost:8501>.
+
+---
+
 ## API Reference
 
 ### `POST /api/query`
@@ -277,6 +320,16 @@ Client-visible errors (bad query, wrong API key, rate limit) return HTTP 200 wit
 
 The backend only queries ClinicalTrials.gov. Other major registries (EU Clinical Trials Register, WHO ICTRP, ISRCTN) are not integrated. A registry-agnostic adapter layer and a query fan-out strategy would significantly improve completeness.
 
+### Deeper use of the ClinicalTrials.gov API
+
+The adapter currently maps only a small subset of what the v2 API exposes. `Study.from_api` parses a handful of protocol-section modules (identification, status, design, conditions, arms/interventions, sponsor, locations) and the search layer uses only a few `query.*` parameters and `aggFilters`. Several capabilities that would materially improve answer quality are unused:
+
+- **Richer fields** — the results section (outcome measures, adverse events, participant flow), eligibility criteria, study officials/investigators, detailed location geocoordinates, and dates beyond `startDate` (primary completion, results-posted, last-update). Today a query like *"which investigators are most frequently associated with lung cancer trials?"* fails because the field is never extracted.
+- **Server-side aggregation** — the `/stats/field/values` and field-enumeration endpoints return the exact valid enum values and their frequencies. Grounding the planner and tool schemas in these would shrink prompts, eliminate guessed dimension/field names (the plural-vs-singular mismatch class of bugs), and let some aggregations be answered without paginating raw studies.
+- **Advanced query syntax** — `filter.advanced` with `AREA[...]` expressions and Essie search operators supports far more precise retrieval than the current condition/term/intervention parameters allow.
+
+A more thorough pass over the API reference — mapping the full field catalogue, wiring the stats endpoints, and validating tool enums against the live schema — would raise both coverage and reliability. The current surface was scoped to what the benchmark queries exercised rather than the API's full capability.
+
 ### No streaming
 
 The entire agentic loop completes before any bytes are sent to the client. For complex multi-tool queries (5–10 tool calls, large paginated result sets) this can mean 10–30 seconds of silence. Server-Sent Events or WebSocket streaming of intermediate tool results would improve perceived responsiveness.
@@ -367,6 +420,9 @@ q2v_agent/
 │   ├── eval_result.py     # LLM-based scorer — reads results.jsonl, writes scores.jsonl
 │   ├── results.jsonl      # Raw API responses (generated)
 │   └── scores.jsonl       # Per-query scores 0.0–1.0 (generated)
+├── demo/
+│   ├── app.py             # Streamlit UI — Gallery (cached) + Live Query tabs
+│   └── requirements.txt   # Demo-only dependencies (streamlit, plotly, pandas, networkx)
 ├── tests/
 │   ├── conftest.py
 │   └── test_api.py        # TestClient smoke tests (30 tests, all passing)

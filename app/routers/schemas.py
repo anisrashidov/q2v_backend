@@ -25,7 +25,6 @@ class QueryRequest(BaseModel):
         json_schema_extra={
             "example": {
                 "query": "How many phase 3 cancer trials are currently recruiting?",
-                "time_period": ["2018-01-01", "2023-12-31"],
             }
         }
     )
@@ -40,4 +39,13 @@ class QueryRequest(BaseModel):
         None,
         description="Inclusive date range [start, end] to restrict trial start dates.",
         examples=[["2018-01-01", "2023-12-31"]],
+        json_schema_extra={"x-hidden": True},
     )
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema: Any, handler: Any) -> dict:
+        schema = handler(core_schema)
+        schema = handler.resolve_ref_schema(schema)
+        schema.get("properties", {}).pop("time_period", None)
+        schema.get("required", []).remove("time_period") if "time_period" in schema.get("required", []) else None
+        return schema

@@ -44,9 +44,31 @@ _DIMENSION_ATTR: dict[str, str] = {
 # Used by compute_co_occurrence
 _ALL_DIMENSIONS = list(_DIMENSION_ATTR) + ["country", "intervention"]
 
+# extract_field_values names fields in the plural (conditions, phases,
+# interventions, countries); the dimension helpers below use the singular.
+# The model frequently chains the two and carries the plural form over, so
+# accept both interchangeably instead of failing the whole request.
+_DIMENSION_ALIASES: dict[str, str] = {
+    "phases": "phase",
+    "statuses": "status",
+    "years": "year",
+    "study_types": "study_type",
+    "sponsor_class": "sponsor",
+    "sponsors": "sponsor",
+    "conditions": "condition",
+    "countries": "country",
+    "interventions": "intervention",
+}
+
+
+def _normalize_dimension(dimension: str) -> str:
+    """Map a plural/alias field name to its canonical singular dimension."""
+    return _DIMENSION_ALIASES.get(dimension, dimension)
+
 
 def _study_dim_values(study: Study, dimension: str) -> list[str]:
     """Return all values for *dimension* from a single study."""
+    dimension = _normalize_dimension(dimension)
     if dimension == "phase":
         return study.phases if study.phases else ["N/A"]
     if dimension == "status":
@@ -570,7 +592,7 @@ class ToolRegistry:
 
     def _aggregate_by(self, search_id: str, dimension: str) -> dict[str, int]:
         studies = self._require_search(search_id)
-        attr = _DIMENSION_ATTR.get(dimension)
+        attr = _DIMENSION_ATTR.get(_normalize_dimension(dimension))
         if attr is None:
             raise ValueError(f"Unknown dimension {dimension!r}. Valid: {list(_DIMENSION_ATTR)}")
         return dict(getattr(aggregate_studies(studies), attr))

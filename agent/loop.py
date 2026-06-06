@@ -158,7 +158,21 @@ async def run_agent(
                         )
 
                     fn = registry[name]
-                    result = await fn(**kwargs) if inspect.iscoroutinefunction(fn) else fn(**kwargs)
+                    try:
+                        result = await fn(**kwargs) if inspect.iscoroutinefunction(fn) else fn(**kwargs)
+                    except Exception as exc:
+                        # Feed tool execution errors back to the model as the tool
+                        # result instead of failing the whole request. The error text
+                        # (e.g. "Unknown dimension 'intervention_type'. Valid: [...]")
+                        # lets the model self-correct on the next turn. The
+                        # max_iterations budget bounds any retry loop.
+                        logger.warning("Tool error | %s | %s", name, exc)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": json.dumps({"error": str(exc)}),
+                        })
+                        continue
 
                     if name == "build_visualization":
                         # Auto-assign sequence_index in call order; group is LLM-provided
