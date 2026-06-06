@@ -9,11 +9,14 @@ Handles:
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Optional
 
 import aiohttp
 
 from agent.types import QueryParams, Study, StudyData
+
+logger = logging.getLogger(__name__)
 
 
 class ClinicalTrialsAPI:
@@ -161,7 +164,64 @@ class ClinicalTrialsAPI:
             api["sort"] = params.sort
         return api
 
-    async def _fetch(self, params: dict[str, str]) -> dict:
+    async def fetch_by_nct_ids(self, nct_ids: list[str]) -> StudyData:
+        """Fetch specific studies by their NCT IDs."""
+        api_params = {
+            "format": "json",
+            "filter.ids": ",".join(nct_ids),
+            "pageSize": str(min(len(nct_ids), 1000)),
+            "countTotal": "true",
+        }
+        raw = await self._fetch(api_params)
+        return self._parse_response(raw)
+
+    async def fetch_study_details(self, nct_id: str) -> dict:
+        """Fetch full protocol detail for a single study.
+
+        Returns a curated dict with eligibility, outcomes, locations, and arms
+        in addition to the standard fields available via search.
+        """
+        url = f"{self._base_url}/{nct_id}"
+        raw = await self._fetch({}, url=url)
+        proto = raw.get("protocolSection", {})
+        return {
+            "nct_id": nct_id,
+            "title": proto.get("identificationModule", {}).get("briefTitle"),
+            "official_title": proto.get("identificationModule", {}).get("officialTitle"),
+            "status": proto.get("statusModule", {}).get("overallStatus"),
+            "phases": proto.get("designModule", {}).get("phases", []),
+            "study_type": proto.get("designModule", {}).get("studyType"),
+            "conditions": proto.get("conditionsModule", {}).get("conditions", []),
+            "keywords": proto.get("conditionsModule", {}).get("keywords", []),
+            "sponsor": proto.get("sponsorCollaboratorsModule", {}).get("leadSponsor", {}).get("name"),
+            "enrollment": proto.get("designModule", {}).get("enrollmentInfo", {}).get("count"),
+            "eligibility": proto.get("eligibilityModule", {}).get("eligibilityCriteria"),
+            "min_age": proto.get("eligibilityModule", {}).get("minimumAge"),
+            "max_age": proto.get("eligibilityModule", {}).get("maximumAge"),
+            "sex": proto.get("eligibilityModule", {}).get("sex"),
+            "primary_outcomes": [
+                o.get("measure") for o in
+                proto.get("outcomesModule", {}).get("primaryOutcomes", [])
+            ],
+            "secondary_outcomes": [
+                o.get("measure") for o in
+                proto.get("outcomesModule", {}).get("secondaryOutcomes", [])
+            ],
+            "arms": [
+                {"label": a.get("label"), "type": a.get("type"), "description": a.get("description")}
+                for a in proto.get("armsInterventionsModule", {}).get("armGroups", [])
+            ],
+            "locations_count": len(
+                proto.get("contactsLocationsModule", {}).get("locations", [])
+            ),
+            "countries": list({
+                loc.get("country", "")
+                for loc in proto.get("contactsLocationsModule", {}).get("locations", [])
+                if loc.get("country")
+            }),
+        }
+
+    async def _fetch(self, params: dict[str, str], url: Optional[str] = None) -> dict:
         """GET the studies endpoint with retry / back-off.
 
         Retry strategy
@@ -171,11 +231,19 @@ class ClinicalTrialsAPI:
         * Timeout → exponential back-off
         * Other 4xx → re-raise immediately (no point retrying a client error)
         """
+        target = url or self._base_url
         last_exc: Optional[Exception] = None
 
         for attempt in range(self._max_retries):
             try:
-                async with self._client.get(self._base_url, params=params) as resp:
+                logger.debug(
+                    "ClinicalTrials GET %s params=%s (attempt %d/%d)",
+                    target,
+                    params,
+                    attempt + 1,
+                    self._max_retries,
+                )
+                async with self._client.get(target, params=params) as resp:
                     if resp.status == 429:
                         wait = int(resp.headers.get("Retry-After", str(2 ** attempt * 2)))
                         await asyncio.sleep(wait)

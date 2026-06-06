@@ -1,59 +1,57 @@
 # Query-to-Visualization Clinical Trials Agent
 
-A FastAPI backend that transforms natural-language questions about clinical trials into rich, library-agnostic visualization specifications. Powered by the [ClinicalTrials.gov v2 API](https://clinicaltrials.gov/data-api/api) and Anthropic Claude.
+A FastAPI backend that accepts a natural-language question about clinical trials, autonomously retrieves and analyses data from the [ClinicalTrials.gov v2 API](https://clinicaltrials.gov/data-api/api), and returns a library-agnostic visualization specification ready for any frontend renderer.
 
 ---
 
-## Architecture
+## How It Works
 
 ```
-POST /api/query  {query, fields?}
+POST /api/query  {"query": "...", "time_period": [...]}
         │
         ▼
 ┌─────────────────────────────────────────────────────────┐
-│  Stage 1  INTERPRET   agent/interpret.py                │
-│           LLM converts NL query → QueryParams (LLM)     │
-└───────────────────────────┬─────────────────────────────┘
-                            │
-                            ▼
+│  agent/loop.py  — agentic tool-calling loop             │
+│                                                         │
+│  1. Builds a messages list with the system prompt and   │
+│     the user question.                                  │
+│  2. Calls the OpenAI Chat Completions API with a full   │
+│     catalogue of 24 tools.                              │
+│  3. Executes every tool call returned by the model,     │
+│     feeding results back into the conversation.         │
+│  4. Repeats until the model calls build_visualization   │
+│     and then stops (finish_reason = "stop").            │
+│  5. Returns all accumulated VisualizationSpec objects.  │
+└─────────────────────────────────────────────────────────┘
+        │
+        ▼
 ┌─────────────────────────────────────────────────────────┐
-│  Stage 2  RETRIEVE    agent/retrieve.py                 │
-│           QueryParams → StudyData                       │
-│           httpx · pagination · retry/back-off (API)     │
-└───────────────────────────┬─────────────────────────────┘
-                            │
-                            ▼
+│  ToolRegistry — 24 tools in four categories             │
+│                                                         │
+│  Data retrieval   search_trials, search_trials_by_nct,  │
+│                   get_trial_details                     │
+│  Aggregation      aggregate_by,                         │
+│                   compare_groups, extract_field_values, │
+│                   aggregate_by_country,                 │
+│                   aggregate_by_region,                  │
+│                   compute_co_occurrence                 │
+│  Transformation   sort_and_filter, normalize,           │
+│  & statistics     compute_rolling_average, bin_continuous│
+│                   project_trend, merge_time_series,     │
+│                   compute_average, compute_summary_stats│
+│                   compute_growth_rate, rank_entities    │
+│  Network          build_network,                        │
+│                   extract_network_from_co_occurrence    │
+│  Annotation       add_annotation                        │
+│  Output           build_visualization                   │
+└─────────────────────────────────────────────────────────┘
+        │
+        ▼
 ┌─────────────────────────────────────────────────────────┐
-│  Stage 3a ANALYZE     agent/visualize.py                │
-│           StudyData → AggregatedData  (pure Python)     │
-└───────────────────────────┬─────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────┐
-│  Stage 3b DECIDE      agent/visualize.py                │
-│           question + AggregatedData → chart choice (LLM)│
-│           LLM reads numbers — NEVER computes them        │
-└───────────────────────────┬─────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────┐
-│  Stage 4  SPEC        agent/visualize.py                │
-│           decision + AggregatedData → VisualizationSpec │
-│           (pure, fully validated Pydantic model)        │
-└───────────────────────────┬─────────────────────────────┘
-                            │
-                            ▼
-        {interpreted_params, data_summary, visualization_spec}
+│  adapters/clinicaltrials.py — ClinicalTrials.gov v2     │
+│  aiohttp · pagination · exponential back-off retry      │
+└─────────────────────────────────────────────────────────┘
 ```
-
-### Ports & Adapters
-
-The `agent/` package depends **only** on `ports.py`. Concrete implementations live in `adapters/`.
-
-| Interface (`ports.py`) | Adapter (`adapters/`) | Notes                       |
-| ---------------------- | --------------------- | --------------------------- |
-| `LLMPort`              | `OpenAILLM`           | Tool-use forced JSON output |
-| `ClinicalTrialsPort`   | `ClinicalTrialsAPI`   | httpx, retry, pagination    |
 
 ---
 
@@ -62,199 +60,212 @@ The `agent/` package depends **only** on `ports.py`. Concrete implementations li
 ### Prerequisites
 
 - Python 3.11+
-- [uv](https://github.com/astral-sh/uv) (`pip install uv`)
-- An [Anthropic API key](https://console.anthropic.com/)
+- An [OpenAI API key](https://platform.openai.com/api-keys)
 
 ### Install
 
 ```bash
-uv sync
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
+
+pip install -r requirements.txt
+# For development / testing
+pip install -r requirements-dev.txt
 ```
 
 ### Configure
 
 ```bash
 cp .env.example .env
-# Open .env and set ANTHROPIC_API_KEY=sk-ant-...
+# Open .env and fill in at minimum:
+#   OPENAI_API_KEY=sk-...
 ```
 
-All other settings have sensible defaults (see `.env.example`).
+| Variable         | Default                             | Description                              |
+| ---------------- | ----------------------------------- | ---------------------------------------- |
+| `OPENAI_API_KEY` | —                                   | **Required.** OpenAI API key             |
+| `OPENAI_MODEL`   | `gpt-4.1`                           | Model used for all tool-calling          |
+| `CT_BASE_URL`    | `https://clinicaltrials.gov/api/v2` | ClinicalTrials.gov v2 base URL           |
+| `CT_MAX_PAGES`   | `5`                                 | Max pagination depth per search          |
+| `CT_TIMEOUT`     | `30.0`                              | HTTP timeout in seconds                  |
+| `CT_MAX_RETRIES` | `3`                                 | Retries on transient / rate-limit errors |
+| `DEBUG`          | `false`                             | Enable FastAPI debug mode                |
 
 ### Run
 
 ```bash
-uv run uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reload
 ```
 
 Interactive API docs: <http://localhost:8000/docs>
 
 ---
 
-## Usage
+## API Reference
 
-```bash
-curl -s -X POST http://localhost:8000/api/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "How many phase 3 cancer trials are currently recruiting?"}' \
-  | python -m json.tool
-```
+### `POST /api/query`
 
-Example response:
+#### Request body
 
 ```json
 {
-	"interpreted_params": {
-		"query_cond": "cancer",
-		"filter_overall_status": ["RECRUITING"],
-		"page_size": 50
-	},
-	"data_summary": {
-		"total_count": 4821,
-		"retrieved": 50,
-		"has_more": true
-	},
-	"visualization_spec": {
-		"chart_type": "bar",
-		"title": "Phase 3 Cancer Trials Currently Recruiting",
-		"x_field": "label",
-		"y_field": "value",
-		"series": [{ "label": "PHASE3", "value": 47.0, "group": null }],
-		"axis_labels": { "x": "Phase", "y": "Count" },
-		"aggregation_applied": "Grouped by phase",
-		"total_records": 50
-	}
+	"query": "How many phase 3 cancer trials are currently recruiting?",
+	"time_period": ["2018-01-01", "2023-12-31"]
 }
 ```
 
-The `visualization_spec` is intentionally library-agnostic. Pass it directly to Vega-Lite, Recharts, Chart.js, or any other renderer.
+| Field         | Type                   | Required | Description                                                                                                                                           |
+| ------------- | ---------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `query`       | `string` (min 3 chars) | Yes      | Natural-language question about clinical trials                                                                                                       |
+| `time_period` | `[date, date]`         | No       | Inclusive `[start, end]` date range to restrict trial start dates. Acts as a default — if the query itself mentions a date range, that takes priority |
+
+#### Response envelope
+
+Every response uses the same `BaseResponse` wrapper. The HTTP status is **always 200** for client-facing errors; `500` is reserved for unexpected server failures.
+
+```json
+{
+  "code": 200,
+  "message": "OK",
+  "data": { ... }
+}
+```
+
+| `code` | Meaning                              | `data`                                      |
+| ------ | ------------------------------------ | ------------------------------------------- |
+| `200`  | Success                              | `PipelineResult` object                     |
+| `400`  | Bad or insufficient query            | `null` — `message` explains what is missing |
+| `401`  | Invalid OpenAI API key               | `null`                                      |
+| `429`  | OpenAI rate limit or budget exceeded | `null`                                      |
+
+HTTP `500` (no envelope) for unexpected server errors.
+
+#### `PipelineResult` schema
+
+```json
+{
+	"visualizations": [
+		{
+			"chart_type": "bar_chart",
+			"title": "Phase 3 Cancer Trials by Status",
+			"description": "Distribution of recruiting statuses across 847 phase 3 cancer trials",
+			"encoding": { "x": "label", "y": "value" },
+			"data": [
+				{ "label": "RECRUITING", "value": 412 },
+				{ "label": "COMPLETED", "value": 305 }
+			],
+			"metadata": null,
+			"total_records": 847,
+			"sequence_index": 0,
+			"group": null
+		}
+	]
+}
+```
+
+| Field            | Type             | Description                                                                 |
+| ---------------- | ---------------- | --------------------------------------------------------------------------- |
+| `chart_type`     | `ChartType`      | One of the values below                                                     |
+| `title`          | `string`         | Human-readable chart title                                                  |
+| `description`    | `string \| null` | One-sentence plain-language summary                                         |
+| `encoding`       | `object`         | Field-to-channel mapping (see table below)                                  |
+| `data`           | `object[]`       | Data records shaped to match `chart_type`                                   |
+| `metadata`       | `object \| null` | Optional: filters applied, warnings, annotations                            |
+| `total_records`  | `int`            | Total studies in the underlying dataset                                     |
+| `sequence_index` | `int`            | Position within a multi-chart response (0-based)                            |
+| `group`          | `string \| null` | Semantic label for multi-chart grouping (e.g. `"trends"`, `"distribution"`) |
+
+#### `ChartType` values and expected encoding / data
+
+| `chart_type`     | `encoding`                                                                                                  | `data` record shape                                           |
+| ---------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `bar_chart`      | `{x: "label", y: "value"}`                                                                                  | `{label, value}`                                              |
+| `time_series`    | `{x: "label", y: "value"}`                                                                                  | `{label, value}`                                              |
+| `scatter_plot`   | `{x: "label", y: "value"}`                                                                                  | `{label, value}`                                              |
+| `histogram`      | `{x: "label", y: "count"}`                                                                                  | `{label, count}`                                              |
+| `network_graph`  | `{node_id: "id", node_label: "label", edge_source: "source", edge_target: "target", edge_weight: "weight"}` | `{nodes: [...], edges: [...]}` (single element)               |
+| `choropleth_map` | `{location: "country_name", color: "count"}`                                                                | `{country_name, country_code, count}`                         |
+| `none`           | `{}`                                                                                                        | Single numeric answer — use `description` to convey the value |
+
+The `encoding` object is intentionally Vega-Lite-inspired but not tied to it. Pass it directly to Vega-Lite, Recharts, Chart.js, D3, or any other renderer.
+
+#### Error response example
+
+```json
+{
+	"code": 400,
+	"message": "Your query does not contain enough information to search clinical trials. Please include at least one filter such as a condition, drug name, sponsor, phase, status, or location.",
+	"data": null
+}
+```
 
 ---
 
-## Tests
+## Design Decisions and Tradeoffs
 
-```bash
-uv run pytest
-# or with verbose output:
-uv run pytest -v
-```
+### Agentic tool-calling loop instead of a fixed pipeline
 
-| File                        | What it covers                                    |
-| --------------------------- | ------------------------------------------------- |
-| `tests/test_interpret.py`   | NL → QueryParams with FakeLLM                     |
-| `tests/test_aggregation.py` | Deterministic aggregation, exact counts           |
-| `tests/test_visualize.py`   | Chart-type selection + VisualizationSpec assembly |
-| `tests/test_api.py`         | TestClient smoke tests on POST /api/query         |
+Earlier iterations used a fixed multi-stage pipeline (interpret → retrieve → aggregate → visualise). This was replaced with a single agentic loop where the model drives all decisions via tool calls. The benefit is flexibility: the model can call `search_trials` multiple times for comparisons, chain aggregation and transformation tools arbitrarily, and decide independently whether a bar chart or choropleth map best answers the question. The tradeoff is non-determinism — the same query may take different paths on different runs, making debugging harder.
 
----
+### All search parameters extracted from natural language
 
-## Schema Reference
+The API accepts only `query` (plus an optional `time_period`). There are no structured fields for condition, phase, status, etc. The model extracts these from the query text. This simplifies the API surface and lets callers express nuanced constraints naturally ("phase 2 or 3 trials recruiting women with HER2-positive breast cancer in Europe since 2019"). The tradeoff is that the model may occasionally misread ambiguous phrasing.
 
-### QueryParams
+### `time_period` as an explicit structured field
 
-Maps to ClinicalTrials.gov v2 API query parameters.
+Date ranges are the one exception to natural-language-only input because they are frequently system-generated (e.g. a frontend date picker) and must be reliably honoured. When provided, the date range is injected into the user message as a default that the model uses unless the query text mentions a different range.
 
-| Field                   | API param              | Type            | Default |
-| ----------------------- | ---------------------- | --------------- | ------- |
-| `query_cond`            | `query.cond`           | `str \| null`   | `null`  |
-| `query_term`            | `query.term`           | `str \| null`   | `null`  |
-| `query_intr`            | `query.intr`           | `str \| null`   | `null`  |
-| `filter_overall_status` | `filter.overallStatus` | `str[] \| null` | `null`  |
-| `fields`                | `fields`               | `str[] \| null` | `null`  |
-| `page_size`             | `pageSize`             | `int` 1–1000    | `50`    |
-| `sort`                  | `sort`                 | `str \| null`   | `null`  |
+### `ToolRegistry` as a context manager
 
-Valid `filter_overall_status` values: `RECRUITING`, `NOT_YET_RECRUITING`, `ACTIVE_NOT_RECRUITING`, `COMPLETED`, `SUSPENDED`, `TERMINATED`, `WITHDRAWN`, `AVAILABLE`, `UNKNOWN` (and several rarer values).
+Each request gets its own `ToolRegistry` instance with an isolated `study_cache` (a `dict[search_id → List[Study]]`). The model receives opaque `search_id` handles rather than raw study objects, which keeps tool call payloads small. The context manager guarantees the cache is cleared on exit — including on exceptions — so study data never leaks across requests.
 
-### VisualizationSpec
+### Library-agnostic `VisualizationSpec`
 
-Vega-Lite-inspired, fully library-agnostic.
+The response schema deliberately avoids any rendering-library concepts. `encoding` is a generic field-to-channel mapping; `data` is a list of plain dicts. This means the same backend can serve a Vega-Lite renderer, a Recharts dashboard, and a table renderer without any adapter layer.
 
-| Field                 | Type          | Description                                           |
-| --------------------- | ------------- | ----------------------------------------------------- |
-| `chart_type`          | `ChartType`   | `bar` / `line` / `pie` / `scatter` / `table` / `none` |
-| `title`               | `str`         | Human-readable chart title                            |
-| `description`         | `str \| null` | One-sentence explanation                              |
-| `x_field`             | `str \| null` | DataPoint key for x-axis (`"label"`)                  |
-| `y_field`             | `str \| null` | DataPoint key for y-axis (`"value"`)                  |
-| `series`              | `DataPoint[]` | Aggregated data: `{label, value, group?}`             |
-| `axis_labels`         | `{x, y}`      | Human-readable axis label strings                     |
-| `aggregation_applied` | `str`         | Plain description of the aggregation                  |
-| `total_records`       | `int`         | Total studies in the underlying dataset               |
+### `BaseResponse` envelope with HTTP 200 for client errors
+
+Client-visible errors (bad query, wrong API key, rate limit) return HTTP 200 with a structured `code` / `message` body. This prevents frontend error-handling logic from diverging across HTTP status codes and makes it easy to display a human-readable message directly from `message`. True server errors still surface as HTTP 500 without the envelope so they are not silently swallowed.
+
+### Multi-chart support with economical defaults
+
+`build_visualization` can be called multiple times in one request, producing an ordered list of `VisualizationSpec` objects. The system prompt instructs the model to default to a single chart and only produce multiple when the question explicitly requests it ("show me both the trend and the breakdown"). `sequence_index` is assigned by the loop (not the model) to guarantee stable ordering.
 
 ---
 
-## Adding a New Visualization Type
+## Limitations and What Would Be Improved with More Time
 
-Follow these five steps to add, say, a `heatmap` type.
+### Data coverage
 
-### Step 1 — Add to `ChartType` (`models.py`)
+The backend only queries ClinicalTrials.gov. Other major registries (EU Clinical Trials Register, WHO ICTRP, ISRCTN) are not integrated. A registry-agnostic adapter layer and a query fan-out strategy would significantly improve completeness.
 
-```python
-class ChartType(str, Enum):
-    bar     = "bar"
-    line    = "line"
-    pie     = "pie"
-    scatter = "scatter"
-    table   = "table"
-    none    = "none"
-    heatmap = "heatmap"   # ← new
-```
+### In-memory study cache
 
-### Step 2 — Extend the LLM decision schema (`agent/visualize.py`)
+`study_cache` lives in the `ToolRegistry` object for the lifetime of one request and is then discarded. For large paginated result sets this means the data is re-fetched on every request. A short-lived per-request cache (e.g. keyed by a hash of the query parameters) backed by Redis would reduce API load and latency on repeated or similar queries.
 
-In `_DECISION_SCHEMA`, add the type to the `chart_type` enum:
+### Year-level date filtering
 
-```python
-"chart_type": {
-    "type": "string",
-    "enum": ["bar", "line", "pie", "scatter", "table", "none", "heatmap"],
-},
-```
+`search_trials` accepts `start_year` and `end_year` as integers because the ClinicalTrials.gov API exposes year-level filters. Full ISO-date filtering (e.g. "trials that started after 2022-06-01") is not supported at the retrieval layer and would require post-fetch filtering in Python, which reduces result set accuracy when `max_pages` is low.
 
-### Step 3 — Document the selection rule (`agent/visualize.py`)
+### No streaming
 
-In the `_DECISION_SYSTEM` prompt, add a rule under "Chart-type selection rules":
+The entire agentic loop completes before any bytes are sent to the client. For complex multi-tool queries (5–10 tool calls, large paginated result sets) this can mean 10–30 seconds of silence. Server-Sent Events or WebSocket streaming of intermediate tool results would improve perceived responsiveness.
 
-```
-heatmap → two categorical dimensions with a numeric value; best for
-           showing density patterns (e.g. phase × sponsor class counts)
-```
+### No request authentication or per-user rate limiting
 
-### Step 4 — (Optional) Add a new aggregation
+The API is open. In production it would need an auth layer (API keys or JWT) and per-key rate limiting to prevent abuse and to attribute OpenAI costs to individual callers.
 
-If the chart needs data not in `AggregatedData`:
+### Continent-only geographic grouping
 
-1. Add the field to `AggregatedData` in `models.py`:
+`aggregate_by_region` only supports `region_level="continent"`. Finer-grained groupings (sub-region, WHO region, income group) would require an enriched country-to-region mapping and additional enum values in the tool schema.
 
-    ```python
-    by_phase_sponsor: Dict[str, int] = Field(default_factory=dict)
-    ```
+### Determinism and testability
 
-2. Compute it in `aggregate_studies()` in `agent/visualize.py`.
-
-3. Add the new key to `aggregation_key` in `_DECISION_SCHEMA`:
-
-    ```python
-    "enum": [..., "by_phase_sponsor"],
-    ```
-
-### Step 5 — Write a test (`tests/test_visualize.py`)
-
-```python
-@pytest.mark.asyncio
-async def test_chart_type_heatmap():
-    llm = FakeLLM({
-        "chart_type": "heatmap",
-        "aggregation_key": "by_phase",
-        "title": "Phase Heatmap",
-        "x_label": "Phase",
-        "y_label": "Count",
-    })
-    spec = await decide_and_build_spec("phase heatmap", make_aggregated(), llm)
-    assert spec.chart_type == ChartType.heatmap
-```
-
-That is all. The frontend renderer is responsible for interpreting the new `chart_type` value — the backend remains unchanged beyond these five steps.
+Because the LLM path is non-deterministic, integration tests mock `run_pipeline` rather than running the real loop. A replay/record mechanism (capturing OpenAI responses and replaying them deterministically) would allow true end-to-end regression tests without live API calls.
 
 ---
 
@@ -262,28 +273,28 @@ That is all. The frontend renderer is responsible for interpreting the new `char
 
 ```
 q2v_agent/
-├── models.py                  # Core Pydantic models (shared, no internal deps)
-├── ports.py                   # Abstract port interfaces (LLMPort, ClinicalTrialsPort)
 ├── agent/
-│   ├── interpret.py           # Stage 1: NL → QueryParams
-│   ├── retrieve.py            # Stage 2: QueryParams → StudyData
-│   ├── visualize.py           # Stages 3+4: Aggregate → Decide → VisualizationSpec
-│   └── pipeline.py            # Orchestrates all stages
+│   ├── aggregate.py       # Deterministic study aggregation (counts by phase, status, etc.)
+│   ├── loop.py            # Agentic tool-calling loop (run_agent)
+│   ├── pipeline.py        # Thin orchestrator: run_agent → PipelineResult
+│   ├── prompts.py         # System prompt for the agentic loop
+│   ├── tools.py           # ToolRegistry class + 24 tool implementations + TOOL_SCHEMAS
+│   └── types.py           # Pydantic models: Study, VisualizationSpec, PipelineResult, etc.
 ├── adapters/
-│   ├── anthropic_llm.py       # LLMPort via Anthropic tool-use
-│   └── clinicaltrials_api.py  # ClinicalTrialsPort via httpx
+│   └── clinicaltrials.py  # ClinicalTrials.gov v2 HTTP adapter (aiohttp, retry, pagination)
 ├── app/
-│   ├── config.py              # pydantic-settings (.env)
-│   ├── main.py                # FastAPI app + lifespan
+│   ├── config.py          # pydantic-settings — reads .env
+│   ├── main.py            # FastAPI app + lifespan (OpenAI client, CT API client)
+│   ├── dependencies.py    # FastAPI Depends providers
 │   └── routers/
-│       └── query.py           # POST /api/query
+│       ├── query.py       # POST /api/query
+│       ├── meta.py        # GET /health etc.
+│       └── schemas.py     # QueryRequest, BaseResponse
 ├── tests/
-│   ├── conftest.py            # Sets dummy env var before imports
-│   ├── test_interpret.py
-│   ├── test_aggregation.py
-│   ├── test_visualize.py
-│   └── test_api.py
-├── pyproject.toml
-└── .env.example
+│   ├── conftest.py
+│   └── test_api.py        # TestClient smoke tests
+├── .env.example
+├── requirements.txt
+└── requirements-dev.txt
 ```
 

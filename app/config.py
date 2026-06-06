@@ -36,7 +36,7 @@ class Settings(BaseSettings):
         default="", description="OpenAI API key (required in production)"
     )
     openai_model: str = Field(
-        default="gpt-4.1-mini",
+        default="gpt-4.1",
         description="OpenAI model ID to use for all LLM calls",
     )
 

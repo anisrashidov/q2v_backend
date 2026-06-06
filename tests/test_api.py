@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 
 from agent.types import (
     ChartType,
-    DataPoint,
     DataSummary,
     PipelineResult,
     QueryParams,
@@ -23,21 +22,30 @@ from app.main import app
 # ── Fixture helpers ────────────────────────────────────────────────────────────
 
 
-def _make_result(chart_type: ChartType = ChartType.bar) -> PipelineResult:
+def _make_viz(
+    chart_type: ChartType = ChartType.bar_chart,
+    sequence_index: int = 0,
+    group: str = "distribution",
+) -> VisualizationSpec:
+    return VisualizationSpec(
+        chart_type=chart_type,
+        title="Trials by Phase",
+        encoding={"x": "label", "y": "value"},
+        data=[
+            {"label": "PHASE2", "value": 30.0},
+            {"label": "PHASE3", "value": 15.0},
+        ],
+        total_records=50,
+        sequence_index=sequence_index,
+        group=group,
+    )
+
+
+def _make_result(chart_type: ChartType = ChartType.bar_chart) -> PipelineResult:
     return PipelineResult(
         interpreted_params=QueryParams(query_cond="diabetes", page_size=50),
         data_summary=DataSummary(total_count=1200, retrieved=50, has_more=True),
-        visualization_spec=VisualizationSpec(
-            chart_type=chart_type,
-            title="Trials by Phase",
-            series=[
-                DataPoint(label="PHASE2", value=30.0),
-                DataPoint(label="PHASE3", value=15.0),
-            ],
-            axis_labels={"x": "Phase", "y": "Count"},
-            aggregation_applied="Grouped by phase",
-            total_records=50,
-        ),
+        visualizations=[_make_viz(chart_type)],
     )
 
 
@@ -70,24 +78,25 @@ def test_response_has_all_top_level_fields(client, monkeypatch):
     data = client.post("/api/query", json={"query": "any question"}).json()
     assert "interpreted_params" in data
     assert "data_summary" in data
-    assert "visualization_spec" in data
+    assert "visualizations" in data
 
 
 def test_visualization_spec_shape(client, monkeypatch):
     async def mock_pipeline(*args, **kwargs):
-        return _make_result(ChartType.bar)
+        return _make_result(ChartType.bar_chart)
 
     monkeypatch.setattr("app.routers.query.run_pipeline", mock_pipeline)
 
     data = client.post("/api/query", json={"query": "phases"}).json()
-    spec = data["visualization_spec"]
+    assert isinstance(data["visualizations"], list)
+    spec = data["visualizations"][0]
 
-    assert spec["chart_type"] == "bar"
+    assert spec["chart_type"] == "bar_chart"
     assert spec["title"] == "Trials by Phase"
-    assert isinstance(spec["series"], list)
-    assert len(spec["series"]) == 2
-    assert spec["series"][0]["label"] == "PHASE2"
-    assert spec["series"][0]["value"] == 30.0
+    assert isinstance(spec["data"], list)
+    assert len(spec["data"]) == 2
+    assert spec["data"][0]["label"] == "PHASE2"
+    assert spec["data"][0]["value"] == 30.0
 
 
 def test_data_summary_fields(client, monkeypatch):
@@ -133,14 +142,48 @@ def test_optional_fields_accepted(client, monkeypatch):
     assert resp.status_code == 200
 
 
-def test_line_chart_type_serialised(client, monkeypatch):
+def test_time_series_chart_type_serialised(client, monkeypatch):
     async def mock_pipeline(*args, **kwargs):
-        return _make_result(ChartType.line)
+        return _make_result(ChartType.time_series)
 
     monkeypatch.setattr("app.routers.query.run_pipeline", mock_pipeline)
 
     data = client.post("/api/query", json={"query": "trend over time"}).json()
-    assert data["visualization_spec"]["chart_type"] == "line"
+    assert data["visualizations"][0]["chart_type"] == "time_series"
+
+
+def test_encoding_field_present(client, monkeypatch):
+    async def mock_pipeline(*args, **kwargs):
+        return _make_result()
+
+    monkeypatch.setattr("app.routers.query.run_pipeline", mock_pipeline)
+
+    data = client.post("/api/query", json={"query": "phases"}).json()
+    spec = data["visualizations"][0]
+    assert "encoding" in spec
+    assert spec["encoding"]["x"] == "label"
+    assert spec["encoding"]["y"] == "value"
+
+
+def test_multi_chart_response(client, monkeypatch):
+    async def mock_pipeline(*args, **kwargs):
+        return PipelineResult(
+            visualizations=[
+                _make_viz(ChartType.time_series,   sequence_index=0, group="trends"),
+                _make_viz(ChartType.bar_chart, sequence_index=1, group="distribution"),
+            ]
+        )
+
+    monkeypatch.setattr("app.routers.query.run_pipeline", mock_pipeline)
+
+    data = client.post("/api/query", json={"query": "dashboard"}).json()
+    vizs = data["visualizations"]
+    assert len(vizs) == 2
+    assert vizs[0]["sequence_index"] == 0
+    assert vizs[0]["group"] == "trends"
+    assert vizs[0]["chart_type"] == "time_series"
+    assert vizs[1]["sequence_index"] == 1
+    assert vizs[1]["group"] == "distribution"
 
 
 # ── Validation errors ──────────────────────────────────────────────────────────
@@ -159,7 +202,6 @@ def test_empty_query_string_returns_422(client):
 def test_invalid_body_type_returns_422(client):
     resp = client.post("/api/query", json={"query": 12345})
     # 12345 is coerced to "12345" by Pydantic; length > 3, so 200
-    # This verifies Pydantic coercion rather than a 422
     assert resp.status_code in (200, 422)
 
 

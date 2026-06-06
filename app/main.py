@@ -1,7 +1,7 @@
 """FastAPI application entry-point.
 
 Run with:
-    uv run uvicorn app.main:app --reload
+    python -m uvicorn app.main:app --reload
 
 The lifespan context manager owns shared resources:
 * An ``aiohttp.ClientSession`` shared across all requests.
@@ -13,9 +13,9 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 import aiohttp
+import openai
 from fastapi import FastAPI
 
-from adapters.llm import OpenAILLM
 from adapters.clinicaltrials import ClinicalTrialsAPI
 from app.config import settings
 from app.routers import meta as meta_router
@@ -39,11 +39,9 @@ async def lifespan(app: FastAPI):
         timeout=aiohttp.ClientTimeout(total=settings.ct_timeout),
     )
 
-    logger.info("Starting the OpenAILLM client")
-    app.state.llm = OpenAILLM(
-        api_key=settings.openai_api_key,
-        model=settings.openai_model,
-    )
+    logger.info("Starting the OpenAI client")
+    app.state.llm = openai.AsyncOpenAI(api_key=settings.openai_api_key)
+    app.state.llm_model = settings.openai_model
 
     logger.info("Starting the Clinical Trials API client")
     app.state.ct_api = ClinicalTrialsAPI(

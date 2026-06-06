@@ -5,15 +5,20 @@ decoupled from ``app.state`` access details.
 """
 from __future__ import annotations
 
+import openai
 from fastapi import Request
 
 from adapters.clinicaltrials import ClinicalTrialsAPI
-from agent.ports import LLMPort
 
 
-def get_llm(request: Request) -> LLMPort:
-    """Return the shared LLM adapter stored in app state."""
+def get_llm(request: Request) -> openai.AsyncOpenAI:
+    """Return the shared OpenAI client stored in app state."""
     return request.app.state.llm
+
+
+def get_model(request: Request) -> str:
+    """Return the configured OpenAI model name stored in app state."""
+    return request.app.state.llm_model
 
 
 def get_ct_api(request: Request) -> ClinicalTrialsAPI:

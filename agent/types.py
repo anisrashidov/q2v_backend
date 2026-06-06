@@ -5,7 +5,7 @@ No internal project imports — this is the leaf of the dependency graph.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -132,18 +132,20 @@ class Study(BaseModel):
     sponsor: Optional[str] = None
     sponsor_class: Optional[str] = None  # NIH | INDUSTRY | OTHER | FED | …
     study_type: Optional[str] = None     # INTERVENTIONAL | OBSERVATIONAL | …
+    countries: List[str] = Field(default_factory=list)
 
     @classmethod
     def from_api(cls, raw: dict) -> "Study":
         """Parse a study from a raw ClinicalTrials.gov v2 API response dict."""
         proto = raw.get("protocolSection", {})
 
-        id_mod     = proto.get("identificationModule", {})
-        status_mod = proto.get("statusModule", {})
-        design_mod = proto.get("designModule", {})
-        cond_mod   = proto.get("conditionsModule", {})
-        arms_mod   = proto.get("armsInterventionsModule", {})
+        id_mod      = proto.get("identificationModule", {})
+        status_mod  = proto.get("statusModule", {})
+        design_mod  = proto.get("designModule", {})
+        cond_mod    = proto.get("conditionsModule", {})
+        arms_mod    = proto.get("armsInterventionsModule", {})
         sponsor_mod = proto.get("sponsorCollaboratorsModule", {})
+        loc_mod     = proto.get("contactsLocationsModule", {})
 
         start_struct = status_mod.get("startDateStruct", {})
         comp_struct  = status_mod.get("completionDateStruct", {})
@@ -159,6 +161,12 @@ class Study(BaseModel):
 
         lead_sponsor = sponsor_mod.get("leadSponsor", {})
 
+        countries = list({
+            loc.get("country", "")
+            for loc in loc_mod.get("locations", [])
+            if loc.get("country")
+        })
+
         return cls(
             nct_id=id_mod.get("nctId", ""),
             brief_title=id_mod.get("briefTitle"),
@@ -172,6 +180,7 @@ class Study(BaseModel):
             sponsor=lead_sponsor.get("name"),
             sponsor_class=lead_sponsor.get("class"),
             study_type=design_mod.get("studyType"),
+            countries=countries,
         )
 
 
@@ -213,46 +222,53 @@ class AggregatedData(BaseModel):
 
 
 class ChartType(str, Enum):
-    """Exhaustive set of supported chart types.
+    """Supported chart types.
 
-    To add a new type see README § Adding a New Visualization Type.
+    bar_chart         → discrete category comparison
+    time_series       → ordered time axis (year/month trends)
+    scatter_plot      → two continuous axes
+    histogram         → continuous value distribution (bin_continuous output)
+    network_graph     → nodes and edges (co-occurrence / relationship data)
+    choropleth_map    → geographic fill map (aggregate_by_country output)
+    none              → single-value answer, no meaningful visual
     """
 
-    bar     = "bar"
-    line    = "line"
-    pie     = "pie"
-    scatter = "scatter"
-    table   = "table"
-    none    = "none"
+    bar_chart         = "bar_chart"
+    time_series       = "time_series"
+    scatter_plot      = "scatter_plot"
+    histogram         = "histogram"
+    network_graph     = "network_graph"
+    choropleth_map    = "choropleth_map"
+    none              = "none"
 
 
 class DataPoint(BaseModel):
-    """A single data point in the visualization series."""
+    """Kept for backward compatibility with existing test fixtures."""
 
-    label: str  = Field(description="Category label (x-axis value)")
-    value: float = Field(description="Numeric measure (y-axis value)")
-    group: Optional[str] = Field(
-        None, description="Optional grouping key for grouped/stacked charts"
-    )
+    label: str  = Field(description="Category label")
+    value: float = Field(description="Numeric measure")
+    group: Optional[str] = Field(None, description="Optional grouping key")
 
 
 class VisualizationSpec(BaseModel):
-    """Vega-Lite-inspired, library-agnostic chart specification."""
+    """Library-agnostic chart specification.
+
+    encoding       — maps semantic roles to field names, e.g. {"x": "label", "y": "value"}
+    data           — list of records; shape depends on chart_type
+    metadata       — provenance, warnings, annotations, filters applied
+    sequence_index — 0-based position within a multi-chart response (auto-assigned by the loop)
+    group          — semantic label for this chart in a dashboard, e.g. "trends", "distribution"
+    """
 
     chart_type: ChartType
     title: str
     description: Optional[str] = None
-    x_field: Optional[str] = Field(None, description='DataPoint field for x-axis, e.g. "label"')
-    y_field: Optional[str] = Field(None, description='DataPoint field for y-axis, e.g. "value"')
-    series: List[DataPoint] = Field(default_factory=list)
-    axis_labels: Dict[str, str] = Field(
-        default_factory=dict,
-        description='e.g. {"x": "Phase", "y": "Trials"}',
-    )
-    aggregation_applied: str = Field(
-        description="Human-readable description of the aggregation used"
-    )
+    encoding: Dict[str, Any] = Field(default_factory=dict)
+    data: List[Dict[str, Any]] = Field(default_factory=list)
+    metadata: Optional[Dict[str, Any]] = None
     total_records: int = Field(0, description="Total studies in the underlying dataset")
+    sequence_index: int = Field(0, description="Position within a multi-chart response")
+    group: Optional[str] = Field(None, description="Semantic label for this chart, e.g. 'trends'")
 
 
 # ── Pipeline result ────────────────────────────────────────────────────────────
@@ -267,6 +283,6 @@ class DataSummary(BaseModel):
 class PipelineResult(BaseModel):
     """Top-level response envelope returned by POST /api/query."""
 
-    interpreted_params: QueryParams
-    data_summary:       DataSummary
-    visualization_spec: VisualizationSpec
+    visualizations: List[VisualizationSpec]
+    interpreted_params: Optional[QueryParams] = None
+    data_summary:       Optional[DataSummary] = None
