@@ -19,11 +19,29 @@ import openai
 from adapters.clinicaltrials import ClinicalTrialsAPI
 from agent.prompts import AGENT_SYSTEM_PROMPT
 from agent.tools import TOOL_SCHEMAS, ToolRegistry
-from agent.types import VisualizationSpec
+from agent.types import QueryPlan, VisualizationSpec
 
 logger = logging.getLogger(__name__)
 
-_MAX_ITERATIONS = 20
+# Iteration budget scales with how many charts the plan intends, so a dashboard
+# query gets more room than a single-chart query without an open-ended loop.
+_BASE_ITERATIONS = 15
+_ITERATIONS_PER_CHART = 6
+
+
+def _format_plan(plan: QueryPlan) -> str:
+    """Render a QueryPlan as guidance text injected into the execution loop."""
+    lines = [
+        "PLAN (follow this unless tool results require deviating):",
+        f"Search strategy: {plan.search_strategy}",
+        "Intended charts:",
+    ]
+    for i, chart in enumerate(plan.charts, 1):
+        lines.append(f'  {i}. {chart.chart_type.value} — "{chart.title}" ({chart.rationale})')
+        if chart.tool_sequence:
+            lines.append(f"     tools: {' → '.join(chart.tool_sequence)}")
+    return "\n".join(lines)
+
 
 async def run_agent(
     question: str,
@@ -32,6 +50,7 @@ async def run_agent(
     model: str,
     max_pages: int = 5,
     time_period: Optional[Tuple[date, date]] = None,
+    plan: Optional[QueryPlan] = None,
 ) -> List[VisualizationSpec]:
     """Run the agentic tool-calling loop for one user question.
 
@@ -47,10 +66,12 @@ async def run_agent(
         OpenAI model ID (e.g. "gpt-4.1").
     max_pages:
         Maximum pagination depth forwarded to search_trials.
-    param_overrides:
-        Optional QueryParams-style field overrides from the request body.
-        Translated to search_trials parameter names and injected as explicit
-        constraints in the user message so the LLM honours them.
+    time_period:
+        Optional default [start, end] date range injected into the user message.
+    plan:
+        Optional QueryPlan from the planning stage. When present it is injected as
+        guidance and its chart count sizes the iteration budget. Execution may
+        still deviate when real tool output requires it.
 
     Returns
     -------
@@ -66,6 +87,8 @@ async def run_agent(
             f"(start_year={start.year}, end_year={end.year}). "
             f"If the question specifies a different date range, use that instead."
         )
+    if plan is not None:
+        user_content += "\n\n" + _format_plan(plan)
 
     messages: list[dict] = [
         {"role": "system", "content": AGENT_SYSTEM_PROMPT},
@@ -75,10 +98,12 @@ async def run_agent(
     results: List[VisualizationSpec] = []
     search_called = False
 
+    expected_charts = len(plan.charts) if (plan and plan.charts) else 1
+    max_iterations = _BASE_ITERATIONS + _ITERATIONS_PER_CHART * expected_charts
+
     with ToolRegistry(ct_api=ct_api, max_pages=max_pages) as registry:
         iteration = 1
-        factor = 1
-        while iteration <= _MAX_ITERATIONS * factor:
+        while iteration <= max_iterations:
             logger.debug("Agent iteration %d | messages=%d", iteration, len(messages))
 
             response = await openai_client.chat.completions.create(
@@ -120,19 +145,10 @@ async def run_agent(
                     if name not in registry:
                         raise ValueError(f"LLM invoked unknown tool: {name!r}")
 
+                    # Query sufficiency is enforced upstream by the planning gate
+                    # (pipeline.run_pipeline). Here we only track that a search
+                    # happened so we never build a chart from no data.
                     if name == "search_trials":
-                        if iteration == 1:
-                            _SEARCH_FILTER_KEYS = {
-                                "condition", "drug", "sponsor", "phase", "status",
-                                "study_type", "intervention_type", "location",
-                                "start_year", "end_year", "sex", "age_group",
-                            }
-                            if not any(kwargs.get(k) for k in _SEARCH_FILTER_KEYS):
-                                raise ValueError(
-                                    "Your query does not contain enough information to search clinical trials. "
-                                    "Please include at least one filter such as a condition, drug name, "
-                                    "sponsor, phase, status, or location."
-                                )
                         search_called = True
 
                     if name == "build_visualization" and not search_called:
@@ -153,8 +169,6 @@ async def run_agent(
                             "build_visualization | sequence_index=%d group=%s chart_type=%s",
                             result.sequence_index, result.group, result.chart_type,
                         )
-                        logger.debug(f"MAX_ITER factor increased by 1.5 times from {factor} to {factor * 1.5}")
-                        factor *= 1.5
                     else:
                         result_payload = result
 
@@ -184,5 +198,5 @@ async def run_agent(
             iteration += 1
 
         raise RuntimeError(
-            f"Agent did not call build_visualization within {_MAX_ITERATIONS} iterations"
+            f"Agent did not call build_visualization within {max_iterations} iterations"
         )

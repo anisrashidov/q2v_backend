@@ -1,0 +1,37 @@
+How are diabetes trials distributed across phases?
+What are the most common intervention types for cancer trials?
+How has the number of trials for Metformin changed per year since 2015?
+How many trials started each year for Alzheimer's disease?
+Compare phase distributions for Pembrolizumab vs Nivolumab.
+Compare sponsor categories across diabetes and obesity trials.
+Which countries have the most recruiting trials for breast cancer?
+Show a network of sponsors and drugs for lung cancer trials.
+Which drugs frequently co-occur in combination studies for leukemia?
+What is the average number of trials per year for Ibuprofen from 2010 to 2020?
+Compare the average trial count for Drug A, Drug B, and Drug C from 2018 to 2023.
+How many Phase 3 trials for Aspirin were completed between 2015 and 2022?
+What proportion of Pfizer-sponsored trials are in Phase 2?
+Which conditions have the most active trials in the United States?
+Show the trend of oncology trials started each year from 2000 to 2023.
+What is the distribution of trial statuses for cardiovascular studies?
+Which sponsors have the most trials for Type 2 Diabetes?
+How has enrollment size changed over time for HIV trials?
+What are the top 10 conditions studied in trials sponsored by NIH?
+Compare the number of trials for Rolaids vs Tums for stomach acid between 2010 and 2020.
+Show a network of drugs and conditions for trials sponsored by Novartis.
+What percentage of trials for Parkinson's disease are in recruiting status?
+How are trials for rheumatoid arthritis distributed across countries?
+What is the year-over-year growth rate of immunotherapy trials since 2010?
+Which drugs co-occur most frequently with Pembrolizumab in combination trials?
+Project the number of diabetes trials for the next 3 years based on current trends.
+What is the median enrollment size for Phase 3 oncology trials?
+Compare trial counts for Europe vs North America for COVID-19 studies.
+Show the smoothed 3-year rolling average of Alzheimer's trials from 2005 to 2023.
+Which investigators are most frequently associated with lung cancer trials?
+How does the phase distribution of Metformin trials compare to Insulin trials?
+What is the distribution of trial durations for cardiovascular studies?
+Which countries have seen the fastest growth in oncology trials since 2015?
+Show a sponsor to condition network for trials involving rare diseases.
+What proportion of trials for Type 2 Diabetes use a drug intervention vs behavioral?
+Which conditions have the highest number of trials with unknown status?
+Show trials for Rolaids for stomach acid between 2015 and 2022 broken down by country.

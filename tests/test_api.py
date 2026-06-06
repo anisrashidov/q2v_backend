@@ -75,7 +75,12 @@ def test_response_has_all_top_level_fields(client, monkeypatch):
 
     monkeypatch.setattr("app.routers.query.run_pipeline", mock_pipeline)
 
-    data = client.post("/api/query", json={"query": "any question"}).json()
+    resp_json = client.post("/api/query", json={"query": "any question"}).json()
+    # Router wraps every response in the BaseResponse envelope.
+    assert "code" in resp_json
+    assert "message" in resp_json
+    assert "data" in resp_json
+    data = resp_json["data"]
     assert "interpreted_params" in data
     assert "data_summary" in data
     assert "visualizations" in data
@@ -87,7 +92,7 @@ def test_visualization_spec_shape(client, monkeypatch):
 
     monkeypatch.setattr("app.routers.query.run_pipeline", mock_pipeline)
 
-    data = client.post("/api/query", json={"query": "phases"}).json()
+    data = client.post("/api/query", json={"query": "phases"}).json()["data"]
     assert isinstance(data["visualizations"], list)
     spec = data["visualizations"][0]
 
@@ -105,7 +110,7 @@ def test_data_summary_fields(client, monkeypatch):
 
     monkeypatch.setattr("app.routers.query.run_pipeline", mock_pipeline)
 
-    data = client.post("/api/query", json={"query": "any question"}).json()
+    data = client.post("/api/query", json={"query": "any question"}).json()["data"]
     summary = data["data_summary"]
 
     assert summary["total_count"] == 1200
@@ -119,7 +124,7 @@ def test_interpreted_params_returned(client, monkeypatch):
 
     monkeypatch.setattr("app.routers.query.run_pipeline", mock_pipeline)
 
-    data = client.post("/api/query", json={"query": "diabetes"}).json()
+    data = client.post("/api/query", json={"query": "diabetes"}).json()["data"]
     params = data["interpreted_params"]
 
     assert params["query_cond"] == "diabetes"
@@ -148,7 +153,7 @@ def test_time_series_chart_type_serialised(client, monkeypatch):
 
     monkeypatch.setattr("app.routers.query.run_pipeline", mock_pipeline)
 
-    data = client.post("/api/query", json={"query": "trend over time"}).json()
+    data = client.post("/api/query", json={"query": "trend over time"}).json()["data"]
     assert data["visualizations"][0]["chart_type"] == "time_series"
 
 
@@ -158,7 +163,7 @@ def test_encoding_field_present(client, monkeypatch):
 
     monkeypatch.setattr("app.routers.query.run_pipeline", mock_pipeline)
 
-    data = client.post("/api/query", json={"query": "phases"}).json()
+    data = client.post("/api/query", json={"query": "phases"}).json()["data"]
     spec = data["visualizations"][0]
     assert "encoding" in spec
     assert spec["encoding"]["x"] == "label"
@@ -176,7 +181,7 @@ def test_multi_chart_response(client, monkeypatch):
 
     monkeypatch.setattr("app.routers.query.run_pipeline", mock_pipeline)
 
-    data = client.post("/api/query", json={"query": "dashboard"}).json()
+    data = client.post("/api/query", json={"query": "dashboard"}).json()["data"]
     vizs = data["visualizations"]
     assert len(vizs) == 2
     assert vizs[0]["sequence_index"] == 0

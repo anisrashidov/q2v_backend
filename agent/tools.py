@@ -42,7 +42,7 @@ _DIMENSION_ATTR: dict[str, str] = {
 }
 
 # Used by compute_co_occurrence
-_ALL_DIMENSIONS = list(_DIMENSION_ATTR) + ["country"]
+_ALL_DIMENSIONS = list(_DIMENSION_ATTR) + ["country", "intervention"]
 
 
 def _study_dim_values(study: Study, dimension: str) -> list[str]:
@@ -74,6 +74,8 @@ def _study_dim_values(study: Study, dimension: str) -> list[str]:
         return study.conditions[:5] if study.conditions else ["N/A"]
     if dimension == "country":
         return study.countries if study.countries else ["N/A"]
+    if dimension == "intervention":
+        return study.interventions[:5] if study.interventions else ["N/A"]
     raise ValueError(f"Unknown dimension {dimension!r}. Valid: {_ALL_DIMENSIONS}")
 
 
@@ -233,6 +235,20 @@ def merge_time_series(series_map: dict[str, dict]) -> list[dict]:
             record[name] = float(data.get(key, 0))
         result.append(record)
     return result
+
+
+def count_values(values: list, top_n: Optional[int] = None) -> dict[str, int]:
+    """Count occurrences in a list of categorical values → {label: count}.
+
+    Use after extract_field_values for categorical fields (interventions,
+    conditions, phases, countries) to turn the raw list into chartable counts.
+    Returns the most frequent entries first; pass top_n to cap the result.
+    """
+    counter: Counter = Counter(
+        str(v) for v in values if v is not None and str(v) != ""
+    )
+    items = counter.most_common(top_n) if top_n else counter.most_common()
+    return dict(items)
 
 
 # ·· Statistical ································································
@@ -435,7 +451,8 @@ class ToolRegistry:
             # Aggregation
             "list_studies":            self._list_studies,
             "aggregate_by":            self._aggregate_by,
-            # "aggregate_by_multi":      self._aggregate_by_multi,
+            "aggregate_by_multi":      self._aggregate_by_multi,
+            "compare_groups":          self._compare_groups,
             "extract_field_values":    self._extract_field_values,
             # Transformation (pure — module-level)
             "sort_and_filter":         sort_and_filter,
@@ -445,6 +462,7 @@ class ToolRegistry:
             "project_trend":           project_trend,
             "compute_co_occurrence":   self._compute_co_occurrence,
             "merge_time_series":       merge_time_series,
+            "count_values":            count_values,
             # Statistical (pure — module-level)
             "compute_average":         compute_average,
             "compute_summary_stats":   compute_summary_stats,
@@ -557,17 +575,54 @@ class ToolRegistry:
             raise ValueError(f"Unknown dimension {dimension!r}. Valid: {list(_DIMENSION_ATTR)}")
         return dict(getattr(aggregate_studies(studies), attr))
 
-    # def _aggregate_by_multi(self, search_id: str, dimensions: list[str]) -> dict:
-    #     if len(dimensions) != 2:
-    #         raise ValueError("aggregate_by_multi requires exactly 2 dimensions")
-    #     studies = self._require_search(search_id)
-    #     dim1, dim2 = dimensions
-    #     result: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    #     for study in studies:
-    #         for v1 in _study_dim_values(study, dim1):
-    #             for v2 in _study_dim_values(study, dim2):
-    #                 result[v1][v2] += 1
-    #     return {k: dict(v) for k, v in result.items()}
+    def _aggregate_by_multi(
+        self, search_id: str, dimensions: list[str], top_k: int = 12
+    ) -> list[dict]:
+        if len(dimensions) != 2:
+            raise ValueError("aggregate_by_multi requires exactly 2 dimensions")
+        studies = self._require_search(search_id)
+        dim1, dim2 = dimensions
+        matrix: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for study in studies:
+            for v1 in _study_dim_values(study, dim1):
+                for v2 in _study_dim_values(study, dim2):
+                    matrix[v1][v2] += 1
+        # Cap cardinality: keep the top_k rows and top_k cols by marginal total,
+        # so high-cardinality dimensions can't return a huge matrix.
+        row_totals = {r: sum(inner.values()) for r, inner in matrix.items()}
+        col_totals: Counter = Counter()
+        for inner in matrix.values():
+            col_totals.update(inner)
+        keep_rows = {r for r, _ in Counter(row_totals).most_common(top_k)}
+        keep_cols = {c for c, _ in col_totals.most_common(top_k)}
+        return [
+            {"row": v1, "col": v2, "value": count}
+            for v1, inner in matrix.items() if v1 in keep_rows
+            for v2, count in inner.items() if v2 in keep_cols
+        ]
+
+    def _compare_groups(self, search_ids: dict[str, str], dimension: str) -> list[dict]:
+        """Aggregate several searches by the same dimension for side-by-side comparison.
+
+        search_ids maps a group label → search_id (e.g. {"Drug A": "search_1"}).
+        Returns flattened [{label, value, group}] records, zero-padded so every
+        group covers the same set of labels. Render with build_visualization(
+        type="bar_chart", encoding={x:"label", y:"value", group:"group"}).
+        """
+        per_group: dict[str, Counter] = {}
+        all_labels: set[str] = set()
+        for group_label, sid in search_ids.items():
+            counts: Counter = Counter()
+            for study in self._require_search(sid):
+                for value in _study_dim_values(study, dimension):
+                    counts[value] += 1
+            per_group[group_label] = counts
+            all_labels |= set(counts)
+        return [
+            {"label": label, "value": counts.get(label, 0), "group": group_label}
+            for group_label, counts in per_group.items()
+            for label in sorted(all_labels)
+        ]
 
     def _extract_field_values(self, search_id: str, field: str) -> list:
         studies = self._require_search(search_id)
@@ -582,6 +637,8 @@ class ToolRegistry:
             "phases":        lambda s: s.phases,
             "interventions": lambda s: s.interventions,
             "countries":     lambda s: s.countries,
+            "sponsor":       lambda s: [s.sponsor] if s.sponsor else [],
+            "sponsor_class": lambda s: [s.sponsor_class] if s.sponsor_class else [],
         }
         extractor = _extractors.get(field)
         if extractor is None:
@@ -628,14 +685,27 @@ class ToolRegistry:
             rows.append(row)
         return rows
 
-    def _compute_co_occurrence(self, search_id: str, field_a: str, field_b: str) -> dict:
+    def _compute_co_occurrence(
+        self, search_id: str, field_a: str, field_b: str, top_k: int = 15
+    ) -> dict:
         studies = self._require_search(search_id)
         matrix: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         for study in studies:
             for a in _study_dim_values(study, field_a):
                 for b in _study_dim_values(study, field_b):
                     matrix[a][b] += 1
-        return {k: dict(v) for k, v in matrix.items()}
+        # Cap cardinality so high-cardinality fields (interventions, conditions)
+        # can't return a matrix too large to fit back into the message context.
+        row_totals = {r: sum(inner.values()) for r, inner in matrix.items()}
+        col_totals: Counter = Counter()
+        for inner in matrix.values():
+            col_totals.update(inner)
+        keep_rows = {r for r, _ in Counter(row_totals).most_common(top_k)}
+        keep_cols = {c for c, _ in col_totals.most_common(top_k)}
+        return {
+            r: {c: v for c, v in inner.items() if c in keep_cols}
+            for r, inner in matrix.items() if r in keep_rows
+        }
 
     # ── geographic ─────────────────────────────────────────────────────────────
 
@@ -674,7 +744,7 @@ _STATUS_ENUM = [
     "COMPLETED", "SUSPENDED", "TERMINATED", "WITHDRAWN",
 ]
 _DIMENSION_ENUM = ["phase", "status", "year", "study_type", "sponsor", "enrollment", "condition"]
-_DIMENSION_ENUM_WITH_COUNTRY = _DIMENSION_ENUM + ["country"]
+_DIMENSION_ENUM_WITH_COUNTRY = _DIMENSION_ENUM + ["country", "intervention"]
 
 TOOL_SCHEMAS: list[dict] = [
     # ── Data Retrieval ──────────────────────────────────────────────────────────
@@ -795,59 +865,65 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
-    # {
-    #     "type": "function",
-    #     "function": {
-    #         "name": "aggregate_by_multi",
-    #         "description": (
-    #             "Cross-tabulate studies by exactly 2 dimensions. "
-    #             "Returns {dim1_value: {dim2_value: count}}. "
-    #             "Use for heatmaps or grouped_bar_chart data."
-    #         ),
-    #         "parameters": {
-    #             "type": "object",
-    #             "properties": {
-    #                 "search_id": {"type": "string"},
-    #                 "dimensions": {
-    #                     "type": "array",
-    #                     "items": {"type": "string", "enum": _DIMENSION_ENUM_WITH_COUNTRY},
-    #                     "minItems": 2,
-    #                     "maxItems": 2,
-    #                     "description": "Exactly 2 dimensions to cross-tabulate",
-    #                 },
-    #             },
-    #             "required": ["search_id", "dimensions"],
-    #             "additionalProperties": False,
-    #         },
-    #     },
-    # },
-    # {
-    #     "type": "function",
-    #     "function": {
-    #         "name": "compare_groups",
-    #         "description": (
-    #             "Aggregate multiple search results by the same dimension for side-by-side comparison. "
-    #             "Pass {group_label: search_id}. Returns aligned counts, zero-padded for missing values. "
-    #             "Use to build grouped_bar_chart data."
-    #         ),
-    #         "parameters": {
-    #             "type": "object",
-    #             "properties": {
-    #                 "search_ids": {
-    #                     "type": "object",
-    #                     "additionalProperties": {"type": "string"},
-    #                     "description": "Mapping of group label → search_id",
-    #                 },
-    #                 "dimension": {
-    #                     "type": "string",
-    #                     "enum": _DIMENSION_ENUM_WITH_COUNTRY,
-    #                 },
-    #             },
-    #             "required": ["search_ids", "dimension"],
-    #             "additionalProperties": False,
-    #         },
-    #     },
-    # },
+    {
+        "type": "function",
+        "function": {
+            "name": "aggregate_by_multi",
+            "description": (
+                "Cross-tabulate studies by exactly 2 dimensions. "
+                "Returns [{row, col, value}] — one record per cell. "
+                "Pass directly as data= to build_visualization(type='heatmap')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "search_id": {"type": "string"},
+                    "dimensions": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": _DIMENSION_ENUM_WITH_COUNTRY},
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "description": "Exactly 2 dimensions to cross-tabulate, e.g. ['phase', 'status']",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Keep only the top K rows and columns by frequency (default 12)",
+                    },
+                },
+                "required": ["search_id", "dimensions"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_groups",
+            "description": (
+                "Aggregate multiple searches by the same dimension for side-by-side comparison. "
+                "Pass {group_label: search_id} (one search per entity, e.g. {'Drug A': 'search_1', "
+                "'Drug B': 'search_2'}). Returns flattened [{label, value, group}], zero-padded so "
+                "every group shares the same labels. Render with build_visualization(type='bar_chart', "
+                "encoding={x:'label', y:'value', group:'group'})."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "search_ids": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Mapping of group label → search_id",
+                    },
+                    "dimension": {
+                        "type": "string",
+                        "enum": _DIMENSION_ENUM_WITH_COUNTRY,
+                    },
+                },
+                "required": ["search_ids", "dimension"],
+                "additionalProperties": False,
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -862,10 +938,35 @@ TOOL_SCHEMAS: list[dict] = [
                     "search_id": {"type": "string"},
                     "field": {
                         "type": "string",
-                        "enum": ["enrollment", "year", "conditions", "phases", "interventions", "countries"],
+                        "enum": ["enrollment", "year", "conditions", "phases", "interventions", "countries", "sponsor", "sponsor_class"],
                     },
                 },
                 "required": ["search_id", "field"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "count_values",
+            "description": (
+                "Count occurrences in a list of categorical values, returning {label: count}. "
+                "Use after extract_field_values on a categorical field "
+                "(interventions, conditions, phases, countries) to build bar_chart data. "
+                "This is the only way to chart interventions/drugs by frequency."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "values": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of categorical values from extract_field_values",
+                    },
+                    "top_n": {"type": "integer", "description": "Keep only the N most frequent (default: all)"},
+                },
+                "required": ["values"],
                 "additionalProperties": False,
             },
         },
@@ -992,6 +1093,10 @@ TOOL_SCHEMAS: list[dict] = [
                     "search_id": {"type": "string"},
                     "field_a": {"type": "string", "enum": _DIMENSION_ENUM_WITH_COUNTRY},
                     "field_b": {"type": "string", "enum": _DIMENSION_ENUM_WITH_COUNTRY},
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Keep only the top K rows and columns by frequency (default 15)",
+                    },
                 },
                 "required": ["search_id", "field_a", "field_b"],
                 "additionalProperties": False,
@@ -1240,7 +1345,8 @@ TOOL_SCHEMAS: list[dict] = [
                             "network_graph=nodes+edges (build_network) | "
                             "choropleth_map=geographic fill (aggregate_by_country) | "
                             "none=single answer | "
-                            "table=multi-column rows"
+                            "table=multi-column rows | "
+                            "heatmap=two categorical axes with numeric intensity (aggregate_by_multi)"
                         ),
                     },
                     "title": {"type": "string"},
@@ -1252,7 +1358,8 @@ TOOL_SCHEMAS: list[dict] = [
                             "time_series → {x:'label',y:'value'} | "
                             "choropleth_map → {location:'country_name',color:'count'} | "
                             "network_graph → {node_id:'id',node_label:'label',edge_source:'source',edge_target:'target',edge_weight:'weight'} | "
-                            "table → {columns:['col1',…]}"
+                            "table → {columns:['col1',…]} | "
+                            "heatmap → {x:'col',y:'row',color:'value'}"
                         ),
                     },
                     "data": {
@@ -1261,10 +1368,11 @@ TOOL_SCHEMAS: list[dict] = [
                         "description": (
                             "Data records. Shape depends on chart_type: "
                             "bar/time/scatter/histogram → [{label,value,…}] | "
-                            "grouped_bar → [{label,value,<group_field>}] | "
+                            "grouped bar (comparison) → bar_chart with [{label,value,group}] (compare_groups output) | "
                             "choropleth_map → [{country_name,country_code,count}] | "
                             "network_graph → [{nodes:[…],edges:[…]}] (single element) | "
-                            "table → [{col1,col2,…}]"
+                            "table → [{col1,col2,…}] | "
+                            "heatmap → [{row,col,value}] (aggregate_by_multi output)"
                         ),
                     },
                     "description": {"type": "string", "description": "One-sentence plain-language summary"},

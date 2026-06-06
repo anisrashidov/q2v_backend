@@ -241,6 +241,7 @@ class ChartType(str, Enum):
     choropleth_map    = "choropleth_map"
     none              = "none"
     table             = "table"          # table → ranked or multi-column tabular listing
+    heatmap           = "heatmap"        # heatmap → two categorical axes with a numeric intensity
 
 
 class DataPoint(BaseModel):
@@ -270,6 +271,55 @@ class VisualizationSpec(BaseModel):
     total_records: int = Field(0, description="Total studies in the underlying dataset")
     sequence_index: int = Field(0, description="Position within a multi-chart response")
     group: Optional[str] = Field(None, description="Semantic label for this chart, e.g. 'trends'")
+
+
+# ── Query plan (planning stage) ──────────────────────────────────────────────────
+
+
+class PlannedChart(BaseModel):
+    """One chart the planner intends to produce, before any tools run.
+
+    chart_type is validated against ChartType, so the planner cannot propose a
+    type the pipeline can't render. tool_sequence is advisory — execution may
+    deviate when real tool output requires it.
+    """
+
+    chart_type: ChartType
+    title: str = Field(description="Working title for the intended chart")
+    rationale: str = Field(description="Why this chart answers the question")
+    tool_sequence: List[str] = Field(
+        default_factory=list,
+        description="Planned tool call order, e.g. ['search_trials','aggregate_by','build_visualization']",
+    )
+
+
+class QueryPlan(BaseModel):
+    """Structured 'thinking process' produced before the execution loop.
+
+    The pipeline gates on needs_clarification (deterministic), not on whether
+    charts were proposed — a single-value answer legitimately has no real chart.
+    """
+
+    is_clinical_trial_query: bool = Field(
+        description="False if the question is not about clinical trials at all"
+    )
+    needs_clarification: bool = Field(
+        description="True if the query lacks enough detail to search (no condition, drug, sponsor, etc.)"
+    )
+    clarification_message: Optional[str] = Field(
+        None, description="If needs_clarification, the question to ask the user"
+    )
+    search_strategy: str = Field(
+        description="How to search: entities, filters, and time window to apply"
+    )
+    charts: List[PlannedChart] = Field(
+        default_factory=list,
+        description=(
+            "Charts the execution loop should aim to produce. Default to exactly ONE; "
+            "include multiple only when the question explicitly asks for several or "
+            "unambiguously implies a dashboard. Empty if needs_clarification is true."
+        ),
+    )
 
 
 # ── Pipeline result ────────────────────────────────────────────────────────────

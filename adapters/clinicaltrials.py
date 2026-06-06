@@ -101,9 +101,38 @@ class ClinicalTrialsAPI:
         "EXPANDED_ACCESS": "exp",
     }
 
+    # Essie equivalents for aggFilter values, used when filter.advanced is also
+    # present (the CT.gov v2 API rejects requests that combine the two params).
+    _AGE_RANGE_ESSIE: dict[str, str] = {
+        "child": "AREA[StdAge]Child",
+        "adult": "AREA[StdAge]Adult",
+        "older": 'AREA[StdAge]"Older Adult"',
+    }
+    _FUNDER_TYPE_ESSIE: dict[str, str] = {
+        "NIH": "AREA[LeadSponsorClass]NIH",
+        "OTHER_GOV": "AREA[LeadSponsorClass]OTHER_GOV",
+        "INDIV": "AREA[LeadSponsorClass]INDIV",
+        "INDUSTRY": "AREA[LeadSponsorClass]INDUSTRY",
+        "OTHER": "AREA[LeadSponsorClass]OTHER",
+        "FED": "AREA[LeadSponsorClass]FED",
+        "NETWORK": "AREA[LeadSponsorClass]NETWORK",
+        "UNKNOWN": "AREA[LeadSponsorClass]UNKNOWN",
+    }
+
+    @staticmethod
+    def _essie_or(parts: list[str]) -> str:
+        """Wrap multiple Essie terms in parens with OR, or return the single term."""
+        return parts[0] if len(parts) == 1 else "(" + " OR ".join(parts) + ")"
+
     @staticmethod
     def _build_params(params: QueryParams) -> dict[str, str]:
-        """Map QueryParams → raw API query-string dict."""
+        """Map QueryParams → raw API query-string dict.
+
+        The CT.gov v2 API does not allow aggFilters and filter.advanced in the
+        same request.  We build filter.advanced first; if it will be non-empty,
+        every aggFilter is converted to an equivalent Essie expression and merged
+        into filter.advanced instead of being sent as aggFilters.
+        """
         api: dict[str, str] = {
             "format": "json",
             "pageSize": str(params.page_size),
@@ -122,32 +151,8 @@ class ClinicalTrialsAPI:
         if params.filter_overall_status:
             api["filter.overallStatus"] = ",".join(params.filter_overall_status)
 
-        agg_filters: list[str] = []
-        if params.filter_phase:
-            nums = ",".join(
-                ClinicalTrialsAPI._PHASE_MAP[p]
-                for p in params.filter_phase
-                if p in ClinicalTrialsAPI._PHASE_MAP
-            )
-            if nums:
-                agg_filters.append(f"phase:{nums}")
-        if params.filter_funder_type:
-            agg_filters.append(f"funderType:{','.join(params.filter_funder_type)}")
-        if params.filter_study_type:
-            mapped = ",".join(
-                ClinicalTrialsAPI._STUDY_TYPE_MAP.get(s, s.lower())
-                for s in params.filter_study_type
-            )
-            if mapped:
-                agg_filters.append(f"studyType:{mapped}")
-        if params.filter_sex:
-            agg_filters.append(f"sex:{params.filter_sex.lower()}")
-        if params.filter_age_range:
-            agg_filters.append(f"ageRange:{','.join(params.filter_age_range)}")
-        if agg_filters:
-            api["aggFilters"] = "|".join(agg_filters)
-
-        # filter.advanced — date range and/or intervention type
+        # Build filter.advanced parts first so we know whether aggFilters must
+        # be promoted to Essie expressions.
         adv_parts: list[str] = []
         if params.filter_start_year or params.filter_end_year:
             start = f"{params.filter_start_year}-01-01" if params.filter_start_year else "MIN"
@@ -155,6 +160,69 @@ class ClinicalTrialsAPI:
             adv_parts.append(f"AREA[StartDate]RANGE[{start},{end}]")
         if params.filter_intervention_type:
             adv_parts.append(f"AREA[InterventionType]{params.filter_intervention_type}")
+
+        # When filter.advanced is in use, all categorical filters must go there
+        # too (as Essie). When it is not in use, the simpler aggFilters suffices.
+        use_advanced = bool(adv_parts)
+        agg_filters: list[str] = []
+
+        if params.filter_phase:
+            if use_advanced:
+                parts = [f"AREA[Phase]{p}" for p in params.filter_phase]
+                adv_parts.append(ClinicalTrialsAPI._essie_or(parts))
+            else:
+                nums = ",".join(
+                    ClinicalTrialsAPI._PHASE_MAP[p]
+                    for p in params.filter_phase
+                    if p in ClinicalTrialsAPI._PHASE_MAP
+                )
+                if nums:
+                    agg_filters.append(f"phase:{nums}")
+
+        if params.filter_funder_type:
+            if use_advanced:
+                parts = [
+                    ClinicalTrialsAPI._FUNDER_TYPE_ESSIE.get(ft, f"AREA[LeadSponsorClass]{ft}")
+                    for ft in params.filter_funder_type
+                ]
+                adv_parts.append(ClinicalTrialsAPI._essie_or(parts))
+            else:
+                agg_filters.append(f"funderType:{','.join(params.filter_funder_type)}")
+
+        if params.filter_study_type:
+            if use_advanced:
+                parts = [f"AREA[StudyType]{s}" for s in params.filter_study_type]
+                adv_parts.append(ClinicalTrialsAPI._essie_or(parts))
+            else:
+                mapped = ",".join(
+                    ClinicalTrialsAPI._STUDY_TYPE_MAP.get(s, s.lower())
+                    for s in params.filter_study_type
+                )
+                if mapped:
+                    agg_filters.append(f"studyType:{mapped}")
+
+        if params.filter_sex:
+            sex_val = params.filter_sex.lower()
+            if use_advanced:
+                if sex_val != "all":
+                    adv_parts.append(f"AREA[Sex]{sex_val.title()}")
+            else:
+                agg_filters.append(f"sex:{sex_val}")
+
+        if params.filter_age_range:
+            if use_advanced:
+                parts = [
+                    ClinicalTrialsAPI._AGE_RANGE_ESSIE[a]
+                    for a in params.filter_age_range
+                    if a in ClinicalTrialsAPI._AGE_RANGE_ESSIE
+                ]
+                if parts:
+                    adv_parts.append(ClinicalTrialsAPI._essie_or(parts))
+            else:
+                agg_filters.append(f"ageRange:{','.join(params.filter_age_range)}")
+
+        if agg_filters:
+            api["aggFilters"] = "|".join(agg_filters)
         if adv_parts:
             api["filter.advanced"] = " AND ".join(adv_parts)
 

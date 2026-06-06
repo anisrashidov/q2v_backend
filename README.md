@@ -26,16 +26,17 @@ POST /api/query  {"query": "...", "time_period": [...]}
         │
         ▼
 ┌─────────────────────────────────────────────────────────┐
-│  ToolRegistry — 24 tools in four categories             │
+│  ToolRegistry — 26 tools in four categories             │
 │                                                         │
 │  Data retrieval   search_trials, search_trials_by_nct,  │
 │                   get_trial_details                     │
-│  Aggregation      aggregate_by,                         │
-│                   compare_groups, extract_field_values, │
+│  Aggregation      aggregate_by, aggregate_by_multi,     │
+│                   compare_groups, list_studies,         │
+│                   extract_field_values,                 │
 │                   aggregate_by_country,                 │
 │                   aggregate_by_region,                  │
 │                   compute_co_occurrence                 │
-│  Transformation   sort_and_filter, normalize,           │
+│  Transformation   sort_and_filter, normalize, count_values│
 │  & statistics     compute_rolling_average, bin_continuous│
 │                   project_trend, merge_time_series,     │
 │                   compute_average, compute_summary_stats│
@@ -183,7 +184,7 @@ HTTP `500` (no envelope) for unexpected server errors.
 
 | `chart_type`     | `encoding`                                                                                                  | `data` record shape                                           |
 | ---------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| `bar_chart`      | `{x: "label", y: "value"}`                                                                                  | `{label, value}`                                              |
+| `bar_chart`      | `{x: "label", y: "value"}` (add `group: "group"` for a grouped comparison)                                  | `{label, value}` — or `{label, value, group}` from `compare_groups` |
 | `time_series`    | `{x: "label", y: "value"}`                                                                                  | `{label, value}`                                              |
 | `scatter_plot`   | `{x: "label", y: "value"}`                                                                                  | `{label, value}`                                              |
 | `histogram`      | `{x: "label", y: "count"}`                                                                                  | `{label, count}`                                              |
@@ -191,6 +192,7 @@ HTTP `500` (no envelope) for unexpected server errors.
 | `choropleth_map` | `{location: "country_name", color: "count"}`                                                                | `{country_name, country_code, count}`                         |
 | `none`           | `{}`                                                                                                        | Single numeric answer — use `description` to convey the value |
 | `table`          | `{columns: ["col1", "col2"]}`                                                                               | `{col1, col2, …}` (one row per record)                        |
+| `heatmap`        | `{x: "col", y: "row", color: "value"}`                                                                      | `{row, col, value}` (one record per cell)                     |
 
 The `encoding` object is intentionally Vega-Lite-inspired but not tied to it. Pass it directly to Vega-Lite, Recharts, Chart.js, D3, or any other renderer.
 
@@ -270,6 +272,54 @@ Because the LLM path is non-deterministic, integration tests mock `run_pipeline`
 
 ---
 
+## Benchmark
+
+The `benchmark/` directory contains tooling for end-to-end quality evaluation against a set of real natural-language queries.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `tests.txt` | 37 evaluation queries covering the full range of chart types, aggregations, comparisons, and time-range requests |
+| `run_eval.py` | POSTs each query to the running API and writes `{query, timestamp, duration_ms, response}` per line to `results.jsonl` |
+| `eval_result.py` | Reads `results.jsonl`, calls an LLM to score each response 0.0–1.0 on completeness and soundness, writes `scores.jsonl` |
+
+### Running the benchmark
+
+```bash
+# 1. Start the server
+uvicorn app.main:app --reload
+
+# 2. Run all queries (results.jsonl written incrementally)
+python benchmark/run_eval.py
+
+# 3. Score the results
+python benchmark/eval_result.py
+```
+
+Both scripts accept optional flags:
+
+```
+run_eval.py    --api-url   http://localhost:8000   # target server
+eval_result.py --model     gpt-4.1-mini            # evaluator model
+               --results   benchmark/results.jsonl # input file
+```
+
+### Results
+
+A benchmark run was completed over the full 37-query set (3 queries were skipped due to server interruption).
+
+```
+Evaluated : 37 / 37
+Average   : 0.777
+```
+
+> **Note:** the score is not corrected for queries where the system correctly returned insufficient-information responses (code 400). Those cases were treated as failures by the evaluator, so the true accuracy on answerable queries is higher than 0.777.
+
+Results are stored in `benchmark/results.jsonl`; per-query LLM scores are in `benchmark/scores.jsonl`.
+
+---
+
 ## Project Structure
 
 ```
@@ -277,10 +327,11 @@ q2v_agent/
 ├── agent/
 │   ├── aggregate.py       # Deterministic study aggregation (counts by phase, status, etc.)
 │   ├── loop.py            # Agentic tool-calling loop (run_agent)
-│   ├── pipeline.py        # Thin orchestrator: run_agent → PipelineResult
-│   ├── prompts.py         # System prompt for the agentic loop
-│   ├── tools.py           # ToolRegistry class + 24 tool implementations + TOOL_SCHEMAS
-│   └── types.py           # Pydantic models: Study, VisualizationSpec, PipelineResult, etc.
+│   ├── pipeline.py        # Thin orchestrator: plan → gate → run_agent → PipelineResult
+│   ├── planner.py         # Plan-and-execute: QueryPlan via structured output before the loop
+│   ├── prompts.py         # System prompts for the planner and agentic loop
+│   ├── tools.py           # ToolRegistry class + 26 tool implementations + TOOL_SCHEMAS
+│   └── types.py           # Pydantic models: Study, VisualizationSpec, QueryPlan, etc.
 ├── adapters/
 │   └── clinicaltrials.py  # ClinicalTrials.gov v2 HTTP adapter (aiohttp, retry, pagination)
 ├── app/
@@ -291,9 +342,15 @@ q2v_agent/
 │       ├── query.py       # POST /api/query
 │       ├── meta.py        # GET /health etc.
 │       └── schemas.py     # QueryRequest, BaseResponse
+├── benchmark/
+│   ├── tests.txt          # 37 evaluation queries
+│   ├── run_eval.py        # Benchmark runner — hits the live API, writes results.jsonl
+│   ├── eval_result.py     # LLM-based scorer — reads results.jsonl, writes scores.jsonl
+│   ├── results.jsonl      # Raw API responses (generated)
+│   └── scores.jsonl       # Per-query scores 0.0–1.0 (generated)
 ├── tests/
 │   ├── conftest.py
-│   └── test_api.py        # TestClient smoke tests
+│   └── test_api.py        # TestClient smoke tests (30 tests, all passing)
 ├── .env.example
 ├── requirements.txt
 └── requirements-dev.txt
